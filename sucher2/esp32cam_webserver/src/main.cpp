@@ -4,6 +4,7 @@
 #include <ArduinoJson.h>
 #include "config.h"
 #include "index_html.h"
+#include "windows.h"
 
 // Kamera-Pinbelegung für AI-Thinker ESP32-CAM
 // Quelle: https://github.com/espressif/arduino-esp32/blob/master/libraries/ESP32/examples/Camera/CameraWebServer/CameraWebServer.ino
@@ -67,6 +68,7 @@ static esp_err_t init_camera()
 
 void handle_root()
 {
+    Serial.println("[handle_root] Root page requested");
     server.send_P(200, "text/html", INDEX_HTML);
 }
 
@@ -97,6 +99,7 @@ void handle_stream()
 // API: empfängt 4 Punkte und Segmentzahlen, berechnet Zwischenpunkte
 void handle_grid()
 {
+    Serial.println("[handle_grid] === GRID REQUEST RECEIVED ===");
     if (server.hasArg("plain") == false) {
         Serial.println("[handle_grid] No body");
         server.send(400, "text/plain", "No body");
@@ -157,6 +160,20 @@ void handle_grid()
     server.send(200, "application/json", response);
 }
 
+// API: Ambilight-Farbberechnung
+void handle_ambilight()
+{
+    Serial.println("[handle_ambilight] === AMBILIGHT REQUEST RECEIVED ===");
+    if (server.hasArg("plain") == false) {
+        Serial.println("[handle_ambilight] No body");
+        server.send(400, "text/plain", "No body");
+        return;
+    }
+
+    String response = processAmbilight(server.arg("plain"));
+    server.send(200, "application/json", response);
+}
+
 void setup()
 {
     Serial.begin(115200);
@@ -178,6 +195,7 @@ void setup()
     server.on("/", HTTP_GET, handle_root);
     server.on("/stream", HTTP_GET, handle_stream);
     server.on("/api/grid", HTTP_POST, handle_grid);
+    server.on("/api/ambilight", HTTP_POST, handle_ambilight);
     server.begin();
     Serial.println("HTTP-Server gestartet");
 }
@@ -185,4 +203,11 @@ void setup()
 void loop()
 {
     server.handleClient();
+    
+    // Heartbeat alle 10 Sekunden
+    static unsigned long lastHeartbeat = 0;
+    if (millis() - lastHeartbeat > 10000) {
+        Serial.println("[loop] Heartbeat - Server läuft");
+        lastHeartbeat = millis();
+    }
 }

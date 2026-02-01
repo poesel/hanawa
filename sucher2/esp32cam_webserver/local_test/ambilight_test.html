@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>ESP32-CAM Ambilight Test (Lokal)</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    #stream-container { position: relative; display: inline-block; }
+    #overlay { position: absolute; left: 0; top: 0; pointer-events: none; }
+    #coords { display: inline-block; vertical-align: top; margin-left: 20px; }
+    button { margin-top: 10px; padding: 8px 16px; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .info { background: #e7f3ff; padding: 10px; margin-bottom: 15px; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <div class="info">
+    <strong>Lokale Test-Version</strong> - Läuft komplett im Browser ohne ESP32-Hardware
+  </div>
+  
+  <h1>ESP32-CAM Ambilight Test - v2.0</h1>
+  <div id="stream-container">
+    <img id="stream" src="testimage.jpg" width="640" height="480" crossorigin="anonymous"/>
+    <canvas id="overlay" width="640" height="480"></canvas>
+  </div>
+  <div id="coords">
+    <h3>Klick-Koordinaten:</h3>
+    <ol id="coordList"></ol>
+
+    <div style="margin-top:10px;">
+      <label>Horizontale Segmente:
+        <input type="number" id="hSeg" value="16" min="1" style="width:60px;">
+      </label>
+      <br/>
+      <label>Vertikale Segmente:
+        <input type="number" id="vSeg" value="10" min="1" style="width:60px;">
+      </label>
+      <br/>
+      <label>Fenster-Tiefe (Pixel):
+        <input type="number" id="depth" value="30" min="5" max="100" style="width:60px;">
+      </label>
+    </div>
+
+    <button id="reset" style="margin-top:10px;">Punkte zurücksetzen</button>
+    <br/>
+    <button id="ambilight" style="margin-top:10px;">Ambilight berechnen (Lokal)</button>
+  </div>
+
+  <script>
+    console.log('JavaScript startet (lokale Version)...');
+    const canvas = document.getElementById('overlay');
+    const ctx = canvas.getContext('2d');
+    const coordList = document.getElementById('coordList');
+    const resetBtn = document.getElementById('reset');
+    const ambilightBtn = document.getElementById('ambilight');
+    console.log('Buttons gefunden:', { reset: !!resetBtn, ambilight: !!ambilightBtn });
+    let points = [];
+    let gridPts = [];
+    let ambilightData = null;
+
+    // ======== LOKALE FARBBERECHNUNG (portiert von windows.cpp) ========
+    
+    // Berechnet RGB-Mittelwert aus ImageData (entspricht calculateMeanRGB aus windows.cpp)
+    function calculateMeanRGB(imageData, x1, y1, x2, y2) {
+      // Koordinaten begrenzen
+      x1 = Math.max(0, Math.min(x1, imageData.width - 1));
+      x2 = Math.max(0, Math.min(x2, imageData.width - 1));
+      y1 = Math.max(0, Math.min(y1, imageData.height - 1));
+      y2 = Math.max(0, Math.min(y2, imageData.height - 1));
+      
+      if (x1 >= x2 || y1 >= y2) {
+        return { r: 128, g: 128, b: 128 };
+      }
+      
+      // Sampling mit step=2 wie im Original
+      const step = 2;
+      let sumR = 0, sumG = 0, sumB = 0;
+      let count = 0;
+      
+      for (let y = y1; y < y2; y += step) {
+        for (let x = x1; x < x2; x += step) {
+          const idx = (y * imageData.width + x) * 4;
+          const r = imageData.data[idx];
+          const g = imageData.data[idx + 1];
+          const b = imageData.data[idx + 2];
+          
+          // Quadratischer Mittelwert (RMS) wie in windows.cpp
+          sumR += r * r;
+          sumG += g * g;
+          sumB += b * b;
+          count++;
+        }
+      }
+      
+      if (count === 0) {
+        return { r: 128, g: 128, b: 128 };
+      }
+      
+      // Quadratwurzel des Durchschnitts mit step-Korrektur
+      return {
+        r: Math.round(Math.sqrt((step * step * sumR) / count)),
+        g: Math.round(Math.sqrt((step * step * sumG) / count)),
+        b: Math.round(Math.sqrt((step * step * sumB) / count))
+      };
+    }
+    
+    // Berechnet alle Fenster-Rechtecke (entspricht calculateAmbilightWindows aus windows.cpp)
+    function calculateAmbilightWindows(topLeft, topRight, botLeft, botRight, xwindows, ywindows, depth) {
+      const topRects = [];
+      const bottomRects = [];
+      const leftRects = [];
+      const rightRects = [];
+      
+      // Fensterbreiten und -höhen berechnen
+      const xtopwinwidth = (topRight[0] - topLeft[0]) / xwindows;     // width of top windows
+      const xbotwinwidth = (botRight[0] - botLeft[0]) / xwindows;     // width of bottom windows
+      const yleftwinheight = (botLeft[1] - topLeft[1]) / ywindows;    // height of left windows
+      const yrightwinheight = (botRight[1] - topRight[1]) / ywindows; // height of right windows
+      
+      // Slopes für Verzerrung der Fenster
+      const topslope = (topRight[1] - topLeft[1]) / xwindows;
+      const bottomslope = (botRight[1] - botLeft[1]) / xwindows;
+      const leftslope = (botLeft[0] - topLeft[0]) / ywindows;
+      const rightslope = (botRight[0] - topRight[0]) / ywindows;
+      
+      // Horizontale Fenster (top und bottom)
+      for (let i = 0; i < xwindows; i++) {
+        // Top
+        const tx1 = topLeft[0] + Math.round(i * xtopwinwidth);
+        const ty1 = topLeft[1] + Math.round(i * topslope);
+        const tx2 = tx1 + Math.round(xtopwinwidth);
+        const ty2 = ty1 + (1-(i / (xwindows-1))) * yleftwinheight + (i / (xwindows-1)) * yrightwinheight; // linear interpolation between left and right window heights
+        topRects.push({ x1: tx1, y1: ty1, x2: tx2, y2: ty2 });
+        
+        // Bottom
+        const bx1 = botLeft[0] + Math.round(i * xbotwinwidth);
+        const by1 = botLeft[1] + Math.round(i * bottomslope) - (1-(i / (xwindows-1))) * yleftwinheight - (i / (xwindows-1)) * yrightwinheight;
+        const bx2 = bx1 + Math.round(xbotwinwidth);
+        const by2 = botLeft[1] + Math.round(i * bottomslope);
+        bottomRects.push({ x1: bx1, y1: by1, x2: bx2, y2: by2 });
+      }
+      
+      // Vertikale Fenster (left und right)
+      for (let i = 1; i < (ywindows-1); i++) {
+        // Left
+        const lx1 = topLeft[0] + Math.round(i * leftslope);
+        const ly1 = topLeft[1] + Math.round(i * yleftwinheight);
+        const lx2 = lx1 + (1- ( i / (ywindows-1))) * xtopwinwidth + (( i / (ywindows-1))) * xbotwinwidth;
+        const ly2 = ly1 + Math.round(yleftwinheight);
+        leftRects.push({ x1: lx1, y1: ly1, x2: lx2, y2: ly2 });
+        
+        // Right
+        const rx1 = topRight[0] + Math.round(i * rightslope) - (1-(i / (ywindows-1))) * xtopwinwidth - (( i / (ywindows-1))) * xbotwinwidth;
+        const ry1 = topRight[1] + Math.round(i * yrightwinheight);
+        const rx2 = topRight[0] + Math.round(i * rightslope);
+        const ry2 = ry1 + Math.round(yrightwinheight);
+        rightRects.push({ x1: rx1, y1: ry1, x2: rx2, y2: ry2 });
+      }
+      
+      return { topRects, bottomRects, leftRects, rightRects };
+    }
+    
+    // Lokale Ambilight-Verarbeitung (ersetzt fetch('/api/ambilight'))
+    function processAmbilightLocal(pointsArray, hSeg, vSeg, depth) {
+      console.log('[LOCAL] Starte Ambilight-Berechnung...');
+      
+      // Lade Bild auf verstecktes Canvas für Pixel-Zugriff
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = 640;
+      tempCanvas.height = 480;
+      const tempCtx = tempCanvas.getContext('2d');
+      const img = document.getElementById('stream');
+      
+      try {
+        tempCtx.drawImage(img, 0, 0);
+        console.log('[LOCAL] Bild auf Canvas geladen');
+      } catch (e) {
+        console.error('[LOCAL] Fehler beim Laden des Bildes:', e);
+        throw new Error('Bild konnte nicht geladen werden');
+      }
+      
+      // Hole ImageData für Pixel-Zugriff
+      const imageData = tempCtx.getImageData(0, 0, 640, 480);
+      console.log('[LOCAL] ImageData erhalten:', imageData.width, 'x', imageData.height);
+      
+      // Eckpunkte extrahieren
+      const topLeft = [pointsArray[0].x, pointsArray[0].y];
+      const topRight = [pointsArray[1].x, pointsArray[1].y];
+      const botRight = [pointsArray[2].x, pointsArray[2].y];
+      const botLeft = [pointsArray[3].x, pointsArray[3].y];
+      
+      console.log('[LOCAL] Eckpunkte:', topLeft, topRight, botRight, botLeft);
+      
+      // Berechne Rechtecke
+      const rects = calculateAmbilightWindows(
+        topLeft, topRight, botLeft, botRight,
+        hSeg, vSeg, depth
+      );
+      
+      console.log('[LOCAL] Rechtecke berechnet:', 
+        rects.topRects.length, 'top,',
+        rects.bottomRects.length, 'bottom,',
+        rects.leftRects.length, 'left,',
+        rects.rightRects.length, 'right'
+      );
+      
+      // Berechne Farben für jedes Rechteck
+      const result = {
+        top: [],
+        bottom: [],
+        left: [],
+        right: [],
+        topRects: [],
+        bottomRects: [],
+        leftRects: [],
+        rightRects: []
+      };
+      
+      console.log('[LOCAL] Berechne Top-Farben...');
+      rects.topRects.forEach(rect => {
+        const color = calculateMeanRGB(imageData, rect.x1, rect.y1, rect.x2, rect.y2);
+        result.top.push([color.r, color.g, color.b]);
+        result.topRects.push(rect);
+      });
+      
+      console.log('[LOCAL] Berechne Bottom-Farben...');
+      rects.bottomRects.forEach(rect => {
+        const color = calculateMeanRGB(imageData, rect.x1, rect.y1, rect.x2, rect.y2);
+        result.bottom.push([color.r, color.g, color.b]);
+        result.bottomRects.push(rect);
+      });
+      
+      console.log('[LOCAL] Berechne Left-Farben...');
+      rects.leftRects.forEach(rect => {
+        const color = calculateMeanRGB(imageData, rect.x1, rect.y1, rect.x2, rect.y2);
+        result.left.push([color.r, color.g, color.b]);
+        result.leftRects.push(rect);
+      });
+      
+      console.log('[LOCAL] Berechne Right-Farben...');
+      rects.rightRects.forEach(rect => {
+        const color = calculateMeanRGB(imageData, rect.x1, rect.y1, rect.x2, rect.y2);
+        result.right.push([color.r, color.g, color.b]);
+        result.rightRects.push(rect);
+      });
+      
+      console.log('[LOCAL] Ambilight-Berechnung abgeschlossen!');
+      return result;
+    }
+    
+    // ======== UI FUNKTIONEN (identisch zur ESP32-Version) ========
+
+    function drawPoints() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Ambilight-Rechtecke zeichnen (falls vorhanden)
+      if (ambilightData) {
+        drawAmbilightRects(ambilightData);
+      }
+
+      // Punkte zeichnen
+      ctx.fillStyle = 'red';
+      points.forEach(p => {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 5, 0, 2 * Math.PI);
+        ctx.fill();
+      });
+
+      // Verbinde Punkte, sobald vier gesetzt wurden
+      if (points.length === 4) {
+        ctx.strokeStyle = 'lime';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(points[0].x, points[0].y);
+        ctx.lineTo(points[1].x, points[1].y);
+        ctx.lineTo(points[2].x, points[2].y);
+        ctx.lineTo(points[3].x, points[3].y);
+        ctx.lineTo(points[0].x, points[0].y);
+        ctx.stroke();
+
+        // gelbe Punkte aus Grid-Berechnung zeichnen
+        ctx.fillStyle = 'yellow';
+        gridPts.forEach(g => {
+          ctx.beginPath();
+          ctx.arc(g.x, g.y, 3, 0, 2 * Math.PI);
+          ctx.fill();
+        });
+      }
+    }
+
+    function drawAmbilightRects(data) {
+      // Zeichne alle Ambilight-Rechtecke mit ihren berechneten Farben
+      const sides = ['top', 'bottom', 'left', 'right'];
+      
+      sides.forEach(side => {
+        const colors = data[side] || [];
+        const rects = data[side + 'Rects'] || [];
+        
+        for (let i = 0; i < colors.length && i < rects.length; i++) {
+          const [r, g, b] = colors[i];
+          const rect = rects[i];
+          
+          // Fülle das Rechteck mit der berechneten Farbe
+          ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+          ctx.fillRect(rect.x1, rect.y1, rect.x2 - rect.x1, rect.y2 - rect.y1);
+          
+          // Zeichne grünen Rahmen für bessere Sichtbarkeit
+          ctx.strokeStyle = 'rgba(0, 255, 0, 0.5)';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(rect.x1, rect.y1, rect.x2 - rect.x1, rect.y2 - rect.y1);
+        }
+      });
+    }
+
+    // Klick auf Bild registrieren
+    document.getElementById('stream-container').addEventListener('click', (e) => {
+      if (points.length >= 4) return; // Maximal vier Punkte
+
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      points.push({ x, y });
+
+      const li = document.createElement('li');
+      li.textContent = `(${Math.round(x)}, ${Math.round(y)})`;
+      coordList.appendChild(li);
+
+      drawPoints();
+    });
+
+    // Punkte zurücksetzen
+    resetBtn.addEventListener('click', () => {
+      points = [];
+      gridPts = [];
+      ambilightData = null;
+      coordList.innerHTML = '';
+      drawPoints();
+    });
+
+    // Ambilight berechnen (LOKAL)
+    ambilightBtn.addEventListener('click', () => {
+      console.log('Ambilight-Button geklickt (lokale Version)!', { punkteAnzahl: points.length });
+      if (points.length !== 4) {
+        alert('Bitte zuerst 4 Eckpunkte setzen!');
+        return;
+      }
+
+      const hSeg = parseInt(document.getElementById('hSeg').value) || 16;
+      const vSeg = parseInt(document.getElementById('vSeg').value) || 10;
+      const depth = parseInt(document.getElementById('depth').value) || 30;
+
+      ambilightBtn.textContent = 'Berechne (lokal)...';
+      ambilightBtn.disabled = true;
+
+      // Verwende lokale Berechnung statt fetch()
+      try {
+        const data = processAmbilightLocal(points, hSeg, vSeg, depth);
+        ambilightData = data;
+        drawPoints();
+        console.log('Ambilight-Daten berechnet:', data);
+      } catch (err) {
+        console.error('Ambilight-Fehler:', err);
+        alert('Fehler bei der Ambilight-Berechnung: ' + err.message);
+      } finally {
+        ambilightBtn.textContent = 'Ambilight berechnen (Lokal)';
+        ambilightBtn.disabled = false;
+      }
+    });
+    
+    // Warte auf Bild-Laden
+    document.getElementById('stream').addEventListener('load', () => {
+      console.log('Testbild geladen!');
+    });
+    
+    document.getElementById('stream').addEventListener('error', () => {
+      console.error('Fehler beim Laden des Testbildes!');
+      alert('Testbild konnte nicht geladen werden. Stelle sicher, dass "testimage.jpg" im gleichen Verzeichnis liegt.');
+    });
+  </script>
+</body>
+</html>
