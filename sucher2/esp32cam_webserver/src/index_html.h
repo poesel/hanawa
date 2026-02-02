@@ -34,10 +34,6 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       <label>Vertikale Segmente:
         <input type="number" id="vSeg" value="10" min="1" style="width:60px;">
       </label>
-      <br/>
-      <label>Fenster-Tiefe (Pixel):
-        <input type="number" id="depth" value="30" min="5" max="100" style="width:60px;">
-      </label>
     </div>
 
     <button id="reset" style="margin-top:10px;">Punkte zurücksetzen</button>
@@ -177,8 +173,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       const payload = {
         points,
         hSeg: parseInt(document.getElementById('hSeg').value) || 16,
-        vSeg: parseInt(document.getElementById('vSeg').value) || 10,
-        depth: parseInt(document.getElementById('depth').value) || 30
+        vSeg: parseInt(document.getElementById('vSeg').value) || 10
       };
       console.log('Sende Ambilight-Request:', payload);
 

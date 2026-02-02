@@ -62,11 +62,92 @@ RGB calculateMeanRGB(uint8_t *rgb_buf, int width, int height, int x1, int y1, in
     return {r, g, b};
 }
 
+// Visuell korrekte Farbmittelwert-Berechnung mit Gamma-Korrektur (sRGB → linear → sRGB)
+// Basiert auf linear.txt - respektiert die menschliche Helligkeitswahrnehmung
+RGB calculateMeanRGB2(uint8_t *rgb_buf, int width, int height, int x1, int y1, int x2, int y2) {
+    if (!rgb_buf) {
+        return {0, 0, 0};
+    }
+
+    // Sicherstellen, dass die Koordinaten im gültigen Bereich liegen
+    x1 = constrain(x1, 0, width - 1);
+    x2 = constrain(x2, 0, width - 1);
+    y1 = constrain(y1, 0, height - 1);
+    y2 = constrain(y2, 0, height - 1);
+
+    if (x1 >= x2 || y1 >= y2) {
+        return {0, 0, 0};
+    }
+
+    // Hilfsfunktion: sRGB (0-255) → linear RGB (0-1)
+    auto srgbToLinear = [](uint8_t value) -> float {
+        float v = value / 255.0f;
+        if (v <= 0.04045f) {
+            return v / 12.92f;
+        } else {
+            return pow((v + 0.055f) / 1.055f, 2.4f);
+        }
+    };
+
+    // Hilfsfunktion: linear RGB (0-1) → sRGB (0-255)
+    auto linearToSrgb = [](float value) -> uint8_t {
+        float v;
+        if (value <= 0.0031308f) {
+            v = value * 12.92f;
+        } else {
+            v = 1.055f * pow(value, 1.0f/2.4f) - 0.055f;
+        }
+        return (uint8_t)round(v * 255.0f);
+    };
+
+    // Sampling mit step=2
+    const int step = 2;
+    float sumLinearR = 0, sumLinearG = 0, sumLinearB = 0;
+    int pixelCount = 0;
+
+    // RGB565: 2 Bytes pro Pixel
+    for (int y = y1; y < y2; y += step) {
+        for (int x = x1; x < x2; x += step) {
+            size_t idx = (y * width + x) * 2;
+            
+            // RGB565 Format: RRRRR GGGGGG BBBBB (16 Bit)
+            uint16_t pixel = (rgb_buf[idx] << 8) | rgb_buf[idx + 1];
+            
+            // Extrahiere RGB-Komponenten und skaliere auf 8 Bit
+            uint8_t r = ((pixel >> 11) & 0x1F) << 3;
+            uint8_t g = ((pixel >> 5) & 0x3F) << 2;
+            uint8_t b = (pixel & 0x1F) << 3;
+            
+            // Konvertiere zu linear und summiere
+            sumLinearR += srgbToLinear(r);
+            sumLinearG += srgbToLinear(g);
+            sumLinearB += srgbToLinear(b);
+            pixelCount++;
+        }
+    }
+
+    if (pixelCount == 0) {
+        return {128, 128, 128};
+    }
+
+    // Mittelwert im linearen Raum
+    float avgLinearR = sumLinearR / pixelCount;
+    float avgLinearG = sumLinearG / pixelCount;
+    float avgLinearB = sumLinearB / pixelCount;
+
+    // Zurück zu sRGB konvertieren
+    return {
+        linearToSrgb(avgLinearR),
+        linearToSrgb(avgLinearG),
+        linearToSrgb(avgLinearB)
+    };
+}
+
 // Berechnet alle Ambilight-Fenster basierend auf den 4 Eckpunkten
 // Entspricht der Logik aus ambivios.py (Zeilen 86-120)
 void calculateAmbilightWindows(
     float topLeft[], float topRight[], float botLeft[], float botRight[],
-    int xwindows, int ywindows, int depth,
+    int xwindows, int ywindows,
     std::vector<WindowRect>& topRects, std::vector<WindowRect>& bottomRects,
     std::vector<WindowRect>& leftRects, std::vector<WindowRect>& rightRects)
 {
@@ -84,36 +165,38 @@ void calculateAmbilightWindows(
 
     // Horizontale Fenster (top und bottom)
     for (int i = 0; i < xwindows; i++) {
-        // Top
-        int x1 = topLeft[0] + round(i * xtopwinwidth);
-        int y1 = topLeft[1] + round(i * topslope);
-        int x2 = x1 + round(xtopwinwidth);
-        int y2 = y1 + depth;
-        topRects.push_back({x1, y1, x2, y2});
+        // Top - Höhe interpoliert zwischen links und rechts
+        int tx1 = topLeft[0] + round(i * xtopwinwidth);
+        int ty1 = topLeft[1] + round(i * topslope);
+        int tx2 = tx1 + round(xtopwinwidth);
+        // Lineare Interpolation der Fensterhöhe zwischen yleftwinheight und yrightwinheight
+        float ty2 = ty1 + (1.0 - (float(i) / (xwindows - 1))) * yleftwinheight + (float(i) / (xwindows - 1)) * yrightwinheight;
+        topRects.push_back({tx1, ty1, tx2, (int)ty2});
 
-        // Bottom
-        x1 = botLeft[0] + round(i * xbotwinwidth);
-        y1 = botLeft[1] + round(i * bottomslope) - depth;
-        x2 = x1 + round(xbotwinwidth);
-        y2 = y1 + depth;
-        bottomRects.push_back({x1, y1, x2, y2});
+        // Bottom - Höhe interpoliert zwischen links und rechts
+        int bx1 = botLeft[0] + round(i * xbotwinwidth);
+        float by1 = botLeft[1] + round(i * bottomslope) - (1.0 - (float(i) / (xwindows - 1))) * yleftwinheight - (float(i) / (xwindows - 1)) * yrightwinheight;
+        int bx2 = bx1 + round(xbotwinwidth);
+        int by2 = botLeft[1] + round(i * bottomslope);
+        bottomRects.push_back({bx1, (int)by1, bx2, by2});
     }
 
-    // Vertikale Fenster (left und right)
-    for (int i = 0; i < ywindows; i++) {
-        // Left
-        int x1 = topLeft[0] + round(i * leftslope);
-        int y1 = topLeft[1] + round(i * yleftwinheight);
-        int x2 = x1 + depth;
-        int y2 = y1 + round(yleftwinheight);
-        leftRects.push_back({x1, y1, x2, y2});
+    // Vertikale Fenster (left und right) - Ecken werden übersprungen (i startet bei 1 und endet bei ywindows-2)
+    for (int i = 1; i < (ywindows - 1); i++) {
+        // Left - Breite interpoliert zwischen oben und unten
+        int lx1 = topLeft[0] + round(i * leftslope);
+        int ly1 = topLeft[1] + round(i * yleftwinheight);
+        // Lineare Interpolation der Fensterbreite zwischen xtopwinwidth und xbotwinwidth
+        float lx2 = lx1 + (1.0 - (float(i) / (ywindows - 1))) * xtopwinwidth + (float(i) / (ywindows - 1)) * xbotwinwidth;
+        int ly2 = ly1 + round(yleftwinheight);
+        leftRects.push_back({lx1, ly1, (int)lx2, ly2});
 
-        // Right
-        x1 = topRight[0] + round(i * rightslope) - depth;
-        y1 = topRight[1] + round(i * yrightwinheight);
-        x2 = x1 + depth;
-        y2 = y1 + round(yrightwinheight);
-        rightRects.push_back({x1, y1, x2, y2});
+        // Right - Breite interpoliert zwischen oben und unten
+        float rx1 = topRight[0] + round(i * rightslope) - (1.0 - (float(i) / (ywindows - 1))) * xtopwinwidth - (float(i) / (ywindows - 1)) * xbotwinwidth;
+        int ry1 = topRight[1] + round(i * yrightwinheight);
+        int rx2 = topRight[0] + round(i * rightslope);
+        int ry2 = ry1 + round(yrightwinheight);
+        rightRects.push_back({(int)rx1, ry1, rx2, ry2});
     }
 }
 
@@ -139,14 +222,11 @@ String processAmbilight(const String& jsonInput) {
 
     int xwindows = doc["hSeg"].as<int>() | 16;
     int ywindows = doc["vSeg"].as<int>() | 10;
-    int depth = doc["depth"].as<int>() | 30;
     
     Serial.print("[processAmbilight] Parameter: hSeg=");
     Serial.print(xwindows);
     Serial.print(", vSeg=");
-    Serial.print(ywindows);
-    Serial.print(", depth=");
-    Serial.println(depth);
+    Serial.println(ywindows);
 
     // Eckpunkte extrahieren
     float topLeft[2] = {pts[0]["x"].as<float>(), pts[0]["y"].as<float>()};
@@ -169,7 +249,7 @@ String processAmbilight(const String& jsonInput) {
     std::vector<WindowRect> topRects, bottomRects, leftRects, rightRects;
     calculateAmbilightWindows(
         topLeft, topRight, botLeft, botRight,
-        xwindows, ywindows, depth,
+        xwindows, ywindows,
         topRects, bottomRects, leftRects, rightRects
     );
     
@@ -242,6 +322,11 @@ String processAmbilight(const String& jsonInput) {
     JsonArray leftRectsJson = outDoc.createNestedArray("leftRects");
     JsonArray rightRectsJson = outDoc.createNestedArray("rightRects");
 
+    // === FARBBERECHNUNG: Wähle zwischen zwei Methoden ===
+    // Option 1: calculateMeanRGB  - RMS-Mittelwert (Original aus ambivios.py)
+    // Option 2: calculateMeanRGB2 - Gamma-korrigierter Mittelwert (visuell korrekt)
+    // Zum Wechseln: Ersetze "calculateMeanRGB" durch "calculateMeanRGB2" in den 4 Blöcken unten
+    
     // Top-Farben berechnen
     Serial.println("[processAmbilight] Berechne Top-Farben...");
     for (const auto& rect : topRects) {

@@ -109,7 +109,7 @@ Diese API berechnet RGB-Durchschnittswerte für Rechtecke entlang der vier Ränd
 
 **Verwendung im Web-UI:**
 1. Setze 4 Eckpunkte durch Klick auf den Video-Stream (z. B. Fernsehbildschirm)
-2. Konfiguriere Segmente und Fenstertiefe
+2. Konfiguriere Segmente
 3. Klicke auf "Ambilight berechnen"
 4. Die Rechtecke werden mit den berechneten Farben visualisiert
 
@@ -123,8 +123,7 @@ Diese API berechnet RGB-Durchschnittswerte für Rechtecke entlang der vier Ränd
     { "x": 76, "y": 200 }
   ],
   "hSeg": 16,
-  "vSeg": 10,
-  "depth": 30
+  "vSeg": 10
 }
 ```
 
@@ -132,7 +131,6 @@ Diese API berechnet RGB-Durchschnittswerte für Rechtecke entlang der vier Ränd
 - `points`: Array mit 4 Eckpunkten (top-left, top-right, bottom-right, bottom-left)
 - `hSeg`: Anzahl horizontaler Segmente (Standard: 16)
 - `vSeg`: Anzahl vertikaler Segmente (Standard: 10)
-- `depth`: Tiefe der Fenster in Pixel (Standard: 30)
 
 **Response:**
 ```json

@@ -37,7 +37,6 @@ Dann öffne: `http://localhost:8000/ambilight_test.html`
 2. **Parameter anpassen**: 
    - Horizontale Segmente: Anzahl der Fenster oben/unten
    - Vertikale Segmente: Anzahl der Fenster links/rechts
-   - Fenster-Tiefe: Wie weit die Fenster nach innen reichen
 3. **Ambilight berechnen**: Klicke auf den Button - die Farbberechnung erfolgt lokal im Browser
 4. **Ergebnis prüfen**: Die Rechtecke werden mit den berechneten Durchschnittsfarben gefüllt
 
