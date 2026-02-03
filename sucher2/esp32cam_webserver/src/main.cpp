@@ -72,28 +72,33 @@ void handle_root()
     server.send_P(200, "text/html", INDEX_HTML);
 }
 
-void handle_stream()
+// Sendet einzelnes JPEG-Snapshot (ersetzt kontinuierlichen Stream)
+void handle_snapshot()
 {
-    WiFiClient client = server.client();
-    const char* header = "HTTP/1.1 200 OK\r\n"
-                         "Access-Control-Allow-Origin: *\r\n"
-                         "Cache-Control: no-cache\r\n"
-                         "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n\r\n";
-    client.print(header);
-
-    while (client.connected()) {
-        camera_fb_t * fb = esp_camera_fb_get();
-        if (!fb) {
-            Serial.println("Kamera-Frame konnte nicht abgerufen werden");
-            continue;
-        }
-        client.printf("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %u\r\n\r\n", fb->len);
-        client.write(fb->buf, fb->len);
-        client.print("\r\n");
-        esp_camera_fb_return(fb);
-        // eine kurze Pause verhindert Überlastung
-        delay(10);
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) {
+        Serial.println("[snapshot] ERROR: Failed to get camera frame");
+        server.send(500, "text/plain", "Camera error");
+        return;
     }
+    
+    server.sendHeader("Access-Control-Allow-Origin", "*");
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    server.sendHeader("Pragma", "no-cache");
+    server.sendHeader("Expires", "-1");
+    server.send_P(200, "image/jpeg", (const char *)fb->buf, fb->len);
+    
+    esp_camera_fb_return(fb);
+}
+
+// Global request logger - wird für JEDEN Request aufgerufen
+void logRequest() {
+    Serial.print("[REQUEST] ");
+    Serial.print(server.method() == HTTP_GET ? "GET" : "POST");
+    Serial.print(" ");
+    Serial.print(server.uri());
+    Serial.print(" from ");
+    Serial.println(server.client().remoteIP());
 }
 
 // API: empfängt 4 Punkte und Segmentzahlen, berechnet Zwischenpunkte
@@ -160,17 +165,30 @@ void handle_grid()
     server.send(200, "application/json", response);
 }
 
-// API: Ambilight-Farbberechnung
-void handle_ambilight()
+// API: Konfiguration setzen (ersetzt /api/grid)
+void handle_config()
 {
-    Serial.println("[handle_ambilight] === AMBILIGHT REQUEST RECEIVED ===");
+    Serial.println("[handle_config] === CONFIG REQUEST RECEIVED ===");
+    
     if (server.hasArg("plain") == false) {
-        Serial.println("[handle_ambilight] No body");
+        Serial.println("[handle_config] No body");
         server.send(400, "text/plain", "No body");
         return;
     }
+    
+    updateAmbilightConfig(server.arg("plain"));
+    
+    server.send(200, "application/json", "{\"status\":\"ok\"}");
+    Serial.println("[handle_config] Config updated!");
+}
 
-    String response = processAmbilight(server.arg("plain"));
+// API: Ambilight-Daten abrufen (GET - gibt gecachte Daten zurück)
+void handle_ambilight()
+{
+    Serial.println("[handle_ambilight] === AMBILIGHT GET REQUEST ===");
+    
+    String response = getAmbilightResult();
+    
     server.send(200, "application/json", response);
 }
 
@@ -192,22 +210,57 @@ void setup()
     }
     Serial.println("\nWLAN verbunden. IP: " + WiFi.localIP().toString());
 
-    server.on("/", HTTP_GET, handle_root);
-    server.on("/stream", HTTP_GET, handle_stream);
-    server.on("/api/grid", HTTP_POST, handle_grid);
-    server.on("/api/ambilight", HTTP_POST, handle_ambilight);
+    // Globaler Request-Logger für ALLE Requests
+    server.onNotFound([]() {
+        Serial.print("[NOT_FOUND] ");
+        Serial.print(server.method() == HTTP_GET ? "GET" : "POST");
+        Serial.print(" ");
+        Serial.println(server.uri());
+        server.send(404, "text/plain", "Not found");
+    });
+
+    server.on("/", HTTP_GET, []() {
+        logRequest();
+        handle_root();
+    });
+    server.on("/api/snapshot", HTTP_GET, []() {
+        logRequest();
+        handle_snapshot();
+    });
+    server.on("/api/grid", HTTP_POST, []() {
+        logRequest();
+        handle_grid();
+    });
+    server.on("/api/config", HTTP_POST, []() {
+        logRequest();
+        handle_config();
+    });
+    server.on("/api/ambilight", HTTP_GET, []() {
+        logRequest();
+        handle_ambilight();
+    });
     server.begin();
-    Serial.println("HTTP-Server gestartet");
+    
+    Serial.print("HTTP-Server gestartet. Free heap: ");
+    Serial.println(ESP.getFreeHeap());
 }
 
 void loop()
 {
     server.handleClient();
     
+    // Kontinuierliche Ambilight-Berechnung (100ms = 10 FPS für anderen ESP)
+    static unsigned long lastAmbilight = 0;
+    unsigned long now = millis();
+    if (now - lastAmbilight > 100) {
+        calculateAmbilightContinuous();
+        lastAmbilight = now;
+    }
+    
     // Heartbeat alle 10 Sekunden
     static unsigned long lastHeartbeat = 0;
-    if (millis() - lastHeartbeat > 10000) {
+    if (now - lastHeartbeat > 10000) {
         Serial.println("[loop] Heartbeat - Server läuft");
-        lastHeartbeat = millis();
+        lastHeartbeat = now;
     }
 }

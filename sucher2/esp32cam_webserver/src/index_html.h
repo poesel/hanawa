@@ -19,7 +19,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <body>
   <h1>ESP32-CAM Live Stream (VGA) - v2.0 Ambilight</h1>
   <div id="stream-container">
-    <img id="stream" src="/stream" width="640" height="480"/>
+    <img id="stream" width="640" height="480"/>
     <canvas id="overlay" width="640" height="480"></canvas>
   </div>
   <div id="coords">
@@ -38,7 +38,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
     <button id="reset" style="margin-top:10px;">Punkte zurücksetzen</button>
     <br/>
-    <button id="ambilight" style="margin-top:10px;">Ambilight berechnen</button>
+    <button id="ambilight" style="margin-top:10px;">Aktualisieren</button>
   </div>
 
   <script>
@@ -48,17 +48,31 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     const coordList = document.getElementById('coordList');
     const resetBtn = document.getElementById('reset');
     const ambilightBtn = document.getElementById('ambilight');
+    const streamImg = document.getElementById('stream');
     console.log('Buttons gefunden:', { reset: !!resetBtn, ambilight: !!ambilightBtn });
     let points = [];
     let gridPts = [];
     let ambilightData = null;
 
+    // === SNAPSHOT-POLLING (ersetzt MJPEG-Stream) ===
+    function updateSnapshot() {
+      // Timestamp anhängen um Browser-Cache zu umgehen
+      streamImg.src = '/api/snapshot?t=' + Date.now();
+    }
+    
+    // Snapshot alle 1 Sekunde aktualisieren
+    setInterval(updateSnapshot, 1000);
+    updateSnapshot(); // Sofort erstes Bild laden
+
     function drawPoints() {
+      console.log('drawPoints aufgerufen, ambilightData:', ambilightData ? 'vorhanden' : 'null');
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       // Ambilight-Rechtecke zeichnen (falls vorhanden)
       if (ambilightData) {
         drawAmbilightRects(ambilightData);
+      } else {
+        console.log('Keine Ambilight-Daten zum Zeichnen');
       }
 
       // Punkte zeichnen
@@ -93,26 +107,97 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
     function drawAmbilightRects(data) {
       // Zeichne alle Ambilight-Rechtecke mit ihren berechneten Farben
+      // WICHTIG: ESP32 sendet Koordinaten für 320x240, Canvas ist 640x480
+      // -> Koordinaten müssen x2 skaliert werden!
+      const scale = 2.0;
+      
+      console.log('drawAmbilightRects aufgerufen mit Daten:', data);
+      
       const sides = ['top', 'bottom', 'left', 'right'];
+      let totalRects = 0;
       
       sides.forEach(side => {
         const colors = data[side] || [];
         const rects = data[side + 'Rects'] || [];
         
+        console.log(`${side}: ${colors.length} Farben, ${rects.length} Rechtecke`);
+        
         for (let i = 0; i < colors.length && i < rects.length; i++) {
           const [r, g, b] = colors[i];
           const rect = rects[i];
           
+          // Skaliere Koordinaten zurück auf Canvas-Größe
+          const x1 = rect.x1 * scale;
+          const y1 = rect.y1 * scale;
+          const x2 = rect.x2 * scale;
+          const y2 = rect.y2 * scale;
+          
+          if (i === 0) {
+            console.log(`${side}[0]: Farbe rgb(${r},${g},${b}), Rect (${x1},${y1}) -> (${x2},${y2})`);
+          }
+          
           // Fülle das Rechteck mit der berechneten Farbe
           ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
-          ctx.fillRect(rect.x1, rect.y1, rect.x2 - rect.x1, rect.y2 - rect.y1);
+          ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
           
           // Zeichne grünen Rahmen für bessere Sichtbarkeit
           ctx.strokeStyle = 'rgba(0, 255, 0, 0.5)';
           ctx.lineWidth = 1;
-          ctx.strokeRect(rect.x1, rect.y1, rect.x2 - rect.x1, rect.y2 - rect.y1);
+          ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+          totalRects++;
         }
       });
+      
+      console.log(`Insgesamt ${totalRects} Rechtecke gezeichnet`);
+    }
+
+    // === KONTINUIERLICHES POLLING ===
+    let pollingInterval = null;
+
+    // Holt Ambilight-Daten vom Server (GET - keine Berechnung, nur Abruf)
+    function fetchAmbilightData() {
+      if (points.length !== 4) {
+        return; // Kein Log mehr, zu viel Spam
+      }
+      
+      console.log('Polling: Hole Daten...');
+      fetch('/api/ambilight')
+        .then(r => {
+          console.log('Polling: Response erhalten, Status:', r.status, r.statusText);
+          return r.text();
+        })
+        .then(text => {
+          console.log('Polling: Response-Text (erste 200 Zeichen):', text.substring(0, 200));
+          const data = JSON.parse(text);
+          console.log('Polling: JSON geparst:', data);
+          if (!data.error) {
+            ambilightData = data;
+            console.log('Polling: ambilightData gesetzt, rufe drawPoints()...');
+            drawPoints();
+          } else {
+            console.error('Polling: Server-Fehler:', data.error);
+          }
+        })
+        .catch(err => {
+          console.error('Polling-Fehler:', err);
+        });
+    }
+
+    // Startet automatisches Polling (nur zur Visualisierung)
+    function startPolling() {
+      if (pollingInterval) return;
+      console.log('Starte Polling...');
+      pollingInterval = setInterval(fetchAmbilightData, 2000); // Alle 2000ms (0.5 Hz)
+      fetchAmbilightData(); // Sofort einmal ausführen
+    }
+
+    // Stoppt Polling
+    function stopPolling() {
+      if (pollingInterval) {
+        console.log('Stoppe Polling...');
+        clearInterval(pollingInterval);
+        pollingInterval = null;
+      }
     }
 
     // Klick auf Bild registrieren
@@ -132,13 +217,17 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
       drawPoints();
 
-      // Wenn vier Punkte vorhanden, an Server schicken
+      // Wenn vier Punkte vorhanden, Konfiguration an Server schicken
       if (points.length === 4) {
         const payload = {
           points,
-          hSeg: parseInt(document.getElementById('hSeg').value) || 1,
-          vSeg: parseInt(document.getElementById('vSeg').value) || 1
+          hSeg: parseInt(document.getElementById('hSeg').value) || 16,
+          vSeg: parseInt(document.getElementById('vSeg').value) || 10
         };
+        
+        console.log('Sende Config:', payload);
+        
+        // Grid-Request für Visualisierung der Zwischenpunkte
         fetch('/api/grid', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -146,8 +235,21 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         })
         .then(r => r.json())
         .then(data => {
+          console.log('Grid-Response:', data);
           gridPts = data.points || [];
           drawPoints();
+        })
+        .catch(console.error);
+        
+        // Config-Request für Ambilight-Berechnung
+        fetch('/api/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        })
+        .then(r => r.json())
+        .then(data => {
+          console.log('Config gesetzt:', data);
         })
         .catch(console.error);
       }
@@ -162,48 +264,17 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       drawPoints();
     });
 
-    // Ambilight berechnen
+    // Button für manuelles Update
     ambilightBtn.addEventListener('click', () => {
-      console.log('Ambilight-Button geklickt!', { punkteAnzahl: points.length });
-      if (points.length !== 4) {
-        alert('Bitte zuerst 4 Eckpunkte setzen!');
-        return;
-      }
-
-      const payload = {
-        points,
-        hSeg: parseInt(document.getElementById('hSeg').value) || 16,
-        vSeg: parseInt(document.getElementById('vSeg').value) || 10
-      };
-      console.log('Sende Ambilight-Request:', payload);
-
-      ambilightBtn.textContent = 'Berechne...';
-      ambilightBtn.disabled = true;
-
-      fetch('/api/ambilight', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      })
-      .then(r => r.json())
-      .then(data => {
-        if (data.error) {
-          alert('Fehler: ' + data.error);
-        } else {
-          ambilightData = data;
-          drawPoints();
-          console.log('Ambilight-Daten empfangen:', data);
-        }
-      })
-      .catch(err => {
-        console.error('Ambilight-Fehler:', err);
-        alert('Fehler beim Abrufen der Ambilight-Daten');
-      })
-      .finally(() => {
-        ambilightBtn.textContent = 'Ambilight berechnen';
-        ambilightBtn.disabled = false;
-      });
+      console.log('Manuelles Update angefordert');
+      fetchAmbilightData();
     });
+
+    // Polling automatisch starten
+    startPolling();
+
+    // Polling stoppen beim Verlassen der Seite
+    window.addEventListener('beforeunload', stopPolling);
   </script>
 </body>
 </html>
