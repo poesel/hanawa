@@ -251,8 +251,10 @@ String processAmbilight(const String& jsonInput) {
         return "{\"error\":\"Need 4 points\"}";
     }
 
-    int xwindows = doc["hSeg"].as<int>() | 16;
-    int ywindows = doc["vSeg"].as<int>() | 10;
+    int hSeg = doc["hSeg"].as<int>();
+    int vSeg = doc["vSeg"].as<int>();
+    int xwindows = (hSeg > 0) ? hSeg : 16;  // Default: 16
+    int ywindows = (vSeg > 0) ? vSeg : 10;  // Default: 10
     
     Serial.print("[processAmbilight] Parameter: hSeg=");
     Serial.print(xwindows);
@@ -497,8 +499,10 @@ void updateAmbilightConfig(const String& jsonInput) {
     g_ambilightConfig.botLeft[0] = pts[3]["x"].as<float>() / 2.0;
     g_ambilightConfig.botLeft[1] = pts[3]["y"].as<float>() / 2.0;
     
-    g_ambilightConfig.hSeg = doc["hSeg"].as<int>() | 16;
-    g_ambilightConfig.vSeg = doc["vSeg"].as<int>() | 10;
+    int hSeg = doc["hSeg"].as<int>();
+    int vSeg = doc["vSeg"].as<int>();
+    g_ambilightConfig.hSeg = (hSeg > 0) ? hSeg : 16;  // Default: 16
+    g_ambilightConfig.vSeg = (vSeg > 0) ? vSeg : 10;  // Default: 10
     g_ambilightConfig.isValid = true;
     
     Serial.print("[updateConfig] Konfiguration gesetzt: TL(");

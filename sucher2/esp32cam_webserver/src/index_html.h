@@ -55,9 +55,41 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     let ambilightData = null;
 
     // === SNAPSHOT-POLLING (ersetzt MJPEG-Stream) ===
+    let snapshotUpdateRunning = false;
+    
     function updateSnapshot() {
-      // Timestamp anhängen um Browser-Cache zu umgehen
-      streamImg.src = '/api/snapshot?t=' + Date.now();
+      if (snapshotUpdateRunning) {
+        console.log('Snapshot-Update bereits aktiv, überspringe...');
+        return;
+      }
+      
+      snapshotUpdateRunning = true;
+      const timestamp = Date.now();
+      
+      fetch('/api/snapshot?t=' + timestamp)
+        .then(response => {
+          if (!response.ok) {
+            throw new Error('Snapshot-Request fehlgeschlagen: ' + response.status);
+          }
+          return response.blob();
+        })
+        .then(blob => {
+          const url = URL.createObjectURL(blob);
+          streamImg.onload = () => {
+            URL.revokeObjectURL(url);
+            snapshotUpdateRunning = false;
+          };
+          streamImg.onerror = () => {
+            URL.revokeObjectURL(url);
+            snapshotUpdateRunning = false;
+            console.error('Fehler beim Laden des Snapshots');
+          };
+          streamImg.src = url;
+        })
+        .catch(err => {
+          console.error('Snapshot-Fehler:', err);
+          snapshotUpdateRunning = false;
+        });
     }
     
     // Snapshot alle 1 Sekunde aktualisieren
