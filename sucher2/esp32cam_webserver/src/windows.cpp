@@ -15,8 +15,8 @@ AmbilightConfig g_ambilightConfig = {
     {295.0, 25.0},   // topRight
     {295.0, 215.0},  // botRight
     {25.0, 215.0},   // botLeft
-    16,              // hSeg (default)
-    10,              // vSeg (default)
+    10,              // hSeg (default)
+    8,               // vSeg (default)
     true             // isValid (default Punkte sind gültig)
 };
 
@@ -213,6 +213,11 @@ void calculateAmbilightWindows(
     }
 
     // Vertikale Fenster (left und right) - Ecken werden übersprungen (i startet bei 1 und endet bei ywindows-2)
+    Serial.print("[calculateWindows] Vertikale Fenster: ywindows=");
+    Serial.print(ywindows);
+    Serial.print(", Loop von i=1 bis i<");
+    Serial.println(ywindows - 1);
+    
     for (int i = 1; i < (ywindows - 1); i++) {
         // Left - Breite interpoliert zwischen oben und unten
         int lx1 = topLeft[0] + round(i * leftslope);
@@ -227,8 +232,29 @@ void calculateAmbilightWindows(
         int ry1 = topRight[1] + round(i * yrightwinheight);
         int rx2 = topRight[0] + round(i * rightslope);
         int ry2 = ry1 + round(yrightwinheight);
+        
+        if (i == 1) {
+            Serial.print("[calculateWindows] Right[0]: rx1=");
+            Serial.print((int)rx1);
+            Serial.print(", ry1=");
+            Serial.print(ry1);
+            Serial.print(", rx2=");
+            Serial.print(rx2);
+            Serial.print(", ry2=");
+            Serial.println(ry2);
+        }
+        
         rightRects.push_back({(int)rx1, ry1, rx2, ry2});
     }
+    
+    Serial.print("[calculateWindows] Ergebnis: Top=");
+    Serial.print(topRects.size());
+    Serial.print(", Bottom=");
+    Serial.print(bottomRects.size());
+    Serial.print(", Left=");
+    Serial.print(leftRects.size());
+    Serial.print(", Right=");
+    Serial.println(rightRects.size());
 }
 
 // Hauptfunktion: verarbeitet JSON-Input und gibt JSON-Response zurück
@@ -253,8 +279,8 @@ String processAmbilight(const String& jsonInput) {
 
     int hSeg = doc["hSeg"].as<int>();
     int vSeg = doc["vSeg"].as<int>();
-    int xwindows = (hSeg > 0) ? hSeg : 16;  // Default: 16
-    int ywindows = (vSeg > 0) ? vSeg : 10;  // Default: 10
+    int xwindows = (hSeg > 0) ? hSeg : 10;  // Default: 10
+    int ywindows = (vSeg > 0) ? vSeg : 8;   // Default: 8
     
     Serial.print("[processAmbilight] Parameter: hSeg=");
     Serial.print(xwindows);
@@ -501,8 +527,8 @@ void updateAmbilightConfig(const String& jsonInput) {
     
     int hSeg = doc["hSeg"].as<int>();
     int vSeg = doc["vSeg"].as<int>();
-    g_ambilightConfig.hSeg = (hSeg > 0) ? hSeg : 16;  // Default: 16
-    g_ambilightConfig.vSeg = (vSeg > 0) ? vSeg : 10;  // Default: 10
+    g_ambilightConfig.hSeg = (hSeg > 0) ? hSeg : 10;  // Default: 10
+    g_ambilightConfig.vSeg = (vSeg > 0) ? vSeg : 8;   // Default: 8
     g_ambilightConfig.isValid = true;
     
     Serial.print("[updateConfig] Konfiguration gesetzt: TL(");
@@ -550,7 +576,7 @@ void calculateAmbilightContinuous() {
         return; // Beende ohne isValid zu ändern
     }
     
-    // JPEG zu RGB565 konvertieren
+    // JPEG zu RGB565 konvertieren mit 2x Skalierung (640x480 -> 320x240)
     int width = fb->width / 2;
     int height = fb->height / 2;
     size_t rgb_len = width * height * 2;
@@ -577,22 +603,22 @@ void calculateAmbilightContinuous() {
     g_ambilightResult.rightColors.clear();
     
     for (const auto& rect : topRects) {
-        RGB color = calculateMeanRGB(rgb_buf, width, height, rect.x1, rect.y1, rect.x2, rect.y2);
+        RGB color = calculateMeanRGB2(rgb_buf, width, height, rect.x1, rect.y1, rect.x2, rect.y2);
         g_ambilightResult.topColors.push_back(color);
     }
     
     for (const auto& rect : bottomRects) {
-        RGB color = calculateMeanRGB(rgb_buf, width, height, rect.x1, rect.y1, rect.x2, rect.y2);
+        RGB color = calculateMeanRGB2(rgb_buf, width, height, rect.x1, rect.y1, rect.x2, rect.y2);
         g_ambilightResult.bottomColors.push_back(color);
     }
     
     for (const auto& rect : leftRects) {
-        RGB color = calculateMeanRGB(rgb_buf, width, height, rect.x1, rect.y1, rect.x2, rect.y2);
+        RGB color = calculateMeanRGB2(rgb_buf, width, height, rect.x1, rect.y1, rect.x2, rect.y2);
         g_ambilightResult.leftColors.push_back(color);
     }
     
     for (const auto& rect : rightRects) {
-        RGB color = calculateMeanRGB(rgb_buf, width, height, rect.x1, rect.y1, rect.x2, rect.y2);
+        RGB color = calculateMeanRGB2(rgb_buf, width, height, rect.x1, rect.y1, rect.x2, rect.y2);
         g_ambilightResult.rightColors.push_back(color);
     }
     
@@ -601,6 +627,19 @@ void calculateAmbilightContinuous() {
     g_ambilightResult.bottomRects = bottomRects;
     g_ambilightResult.leftRects = leftRects;
     g_ambilightResult.rightRects = rightRects;
+    
+    Serial.print("[calculateContinuous] Gespeichert: Top=");
+    Serial.print(g_ambilightResult.topColors.size());
+    Serial.print("/");
+    Serial.print(g_ambilightResult.topRects.size());
+    Serial.print(", Left=");
+    Serial.print(g_ambilightResult.leftColors.size());
+    Serial.print("/");
+    Serial.print(g_ambilightResult.leftRects.size());
+    Serial.print(", Right=");
+    Serial.print(g_ambilightResult.rightColors.size());
+    Serial.print("/");
+    Serial.println(g_ambilightResult.rightRects.size());
     
     g_ambilightResult.timestamp = millis();
     g_ambilightResult.isValid = true;
@@ -616,7 +655,16 @@ String getAmbilightResult() {
         return "{\"error\":\"No data available\"}";
     }
     
-    StaticJsonDocument<4096> doc;
+    Serial.print("[getResult] Serialisiere: Top=");
+    Serial.print(g_ambilightResult.topColors.size());
+    Serial.print(", Left=");
+    Serial.print(g_ambilightResult.leftColors.size());
+    Serial.print(", Right=");
+    Serial.println(g_ambilightResult.rightColors.size());
+    
+    // DynamicJsonDocument für automatische Größenanpassung
+    // Geschätzt: 32 Rechtecke * 100 Bytes = 3200 + Overhead = ~4000 Bytes
+    DynamicJsonDocument doc(6144);
     
     // Top-Farben und Rechtecke
     JsonArray topColors = doc.createNestedArray("top");
@@ -685,6 +733,15 @@ String getAmbilightResult() {
     doc["timestamp"] = g_ambilightResult.timestamp;
     
     String response;
-    serializeJson(doc, response);
+    size_t jsonSize = serializeJson(doc, response);
+    
+    Serial.print("[getResult] JSON-Größe: ");
+    Serial.print(jsonSize);
+    Serial.print(" bytes (capacity: 6144, overflow: ");
+    Serial.print(doc.overflowed() ? "JA!" : "nein");
+    Serial.print(", free heap: ");
+    Serial.print(ESP.getFreeHeap());
+    Serial.println(")");
+    
     return response;
 }

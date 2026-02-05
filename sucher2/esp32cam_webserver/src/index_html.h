@@ -28,11 +28,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
     <div style="margin-top:10px;">
       <label>Horizontale Segmente:
-        <input type="number" id="hSeg" value="16" min="1" style="width:60px;">
+        <input type="number" id="hSeg" value="10" min="1" style="width:60px;">
       </label>
       <br/>
       <label>Vertikale Segmente:
-        <input type="number" id="vSeg" value="10" min="1" style="width:60px;">
+        <input type="number" id="vSeg" value="8" min="1" style="width:60px;">
       </label>
     </div>
 
@@ -43,12 +43,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
   <script>
     console.log('JavaScript startet...');
-    const canvas = document.getElementById('overlay');
-    const ctx = canvas.getContext('2d');
+    const overlayCanvas = document.getElementById('overlay');
+    const ctx = overlayCanvas.getContext('2d');
+    const streamImg = document.getElementById('stream');
     const coordList = document.getElementById('coordList');
     const resetBtn = document.getElementById('reset');
     const ambilightBtn = document.getElementById('ambilight');
-    const streamImg = document.getElementById('stream');
     console.log('Buttons gefunden:', { reset: !!resetBtn, ambilight: !!ambilightBtn });
     let points = [];
     let gridPts = [];
@@ -98,7 +98,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
     function drawPoints() {
       console.log('drawPoints aufgerufen, ambilightData:', ambilightData ? 'vorhanden' : 'null');
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
 
       // Ambilight-Rechtecke zeichnen (falls vorhanden)
       if (ambilightData) {
@@ -236,7 +236,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     document.getElementById('stream-container').addEventListener('click', (e) => {
       if (points.length >= 4) return; // Maximal vier Punkte
 
-      const rect = canvas.getBoundingClientRect();
+      const rect = overlayCanvas.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
 
@@ -253,8 +253,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       if (points.length === 4) {
         const payload = {
           points,
-          hSeg: parseInt(document.getElementById('hSeg').value) || 16,
-          vSeg: parseInt(document.getElementById('vSeg').value) || 10
+          hSeg: parseInt(document.getElementById('hSeg').value) || 10,
+          vSeg: parseInt(document.getElementById('vSeg').value) || 8
         };
         
         console.log('Sende Config:', payload);
