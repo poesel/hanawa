@@ -60,7 +60,10 @@ See [PLAN.md](PLAN.md). Short version:
 ```
 
 Patterns: `solid`, `rainbow`, `fade`, `chase`, `blink`, `random`, `off`;
-`--loop` / `--frames N` / `--fps F`; `--dry` prints the hex dump without UDP.
+`--loop` / `--frames N` / `--fps F` / `--retries N` (resend a frame if the
+`0x80` health byte doesn't come back, default 2, `0` = off); `--dry` prints
+the hex dump without UDP. UDP is fire-and-forget, so occasional datagram loss
+happens - retries make the frame rate reliable.
 For each frame it prints the round-trip time of the `0x80` health byte.
 
 Without `pattern` argument the program opens an **interactive menu** where

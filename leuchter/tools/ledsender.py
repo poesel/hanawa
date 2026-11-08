@@ -98,25 +98,40 @@ class PktLog:
     def miss(self):
         self.write("RX    -   no health byte / timeout")
 
+    def retry(self):
+        self.write("RX    -   no ack yet, resending frame")
+
 
 class Sender:
-    def __init__(self, host, port, log, timeout=1.0):
+    def __init__(self, host, port, log, timeout=1.0, retries=2, retry_delay=0.2):
         self.host, self.port, self.log = host, port, log
         self.timeout = timeout
+        self.retries = retries          # resend on missing ack
+        self.retry_delay = retry_delay  # seconds before the resend
 
     def send(self, frame):
-        """Send frame and wait for 0x80. Returns latency ms or None."""
+        """Send frame, resend up to self.retries times while waiting for 0x80.
+        Returns latency ms of the successful attempt or None if all failed."""
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(self.timeout)
         try:
-            self.log.tx(frame)
-            t0 = time.time()
-            s.sendto(frame, (self.host, self.port))
-            data = s.recv(64)
-            dt = (time.time() - t0) * 1000
-            self.log.rx(data)
-            return dt if data[:1] == HEALTH_BYTE else None
-        except OSError:
+            for attempt in range(self.retries + 1):
+                self.log.tx(frame)
+                t0 = time.time()
+                s.sendto(frame, (self.host, self.port))
+                try:
+                    data = s.recv(64)
+                except OSError:
+                    data = b""
+                dt = (time.time() - t0) * 1000
+                if data[:1] == HEALTH_BYTE:
+                    self.log.rx(data)
+                    return dt
+                if data:
+                    self.log.rx(data)
+                if attempt < self.retries:
+                    self.log.retry()
+                    time.sleep(self.retry_delay)
             self.log.miss()
             return None
         finally:
@@ -145,12 +160,21 @@ def run_pattern(name, args, st, log):
             return
 
 
+def make_sender(st, log):
+    """Sender with current settings; resend delay never exceeds half the frame interval."""
+    interval = 1.0 / st["fps"] if st["fps"] > 0 else 0.2
+    return Sender(st["host"], st["port"], log,
+                  retries=st.get("retries", 2),
+                  retry_delay=max(0.02, min(0.2, interval / 2)))
+
+
 MENU = """
 --- Leuchter menu ---------------------------------------------
 Patterns: solid <c> | rainbow | fade <a> <b> | chase <c> |
           blink <c> | random | off          (colors as rrggbb)
 Settings: fps <f> | leds <n 1..99> | host <ip> | port <p> |
           frames <n> | loop            (loop = send forever)
+          retries <n>        (resend frame if no ack, default 2)
 Other:    log      (show last 20 log lines) | help | quit
 Example:  chase ff0000
 ---------------------------------------------------------------"""
@@ -188,21 +212,31 @@ def menu(st, log):
                     raise SystemExit("fps must be > 0")
                 if cmd == "leds" and not 1 <= st["leds"] < 100:
                     raise SystemExit("leds must be 1..99")
+                if cmd == "fps" and st["sender"] is not None:
+                    st["sender"] = make_sender(st, log)  # keeps retry delay in sync
                 print(f"{cmd} = {st[cmd]}")
             except (IndexError, ValueError):
                 print(f"usage: {cmd} <number>")
         elif cmd == "host":
             if len(parts) > 1:
                 st["host"] = parts[1]
-                st["sender"] = Sender(st["host"], st["port"], log)
+                st["sender"] = make_sender(st, log)
             print(f"host = {st['host']}")
         elif cmd == "port":
             try:
                 st["port"] = int(parts[1])
-                st["sender"] = Sender(st["host"], st["port"], log)
+                st["sender"] = make_sender(st, log)
                 print(f"port = {st['port']}")
             except (IndexError, ValueError):
                 print("usage: port <number>")
+        elif cmd == "retries":
+            try:
+                st["retries"] = max(0, int(parts[1]))
+                if st["sender"] is not None:
+                    st["sender"] = make_sender(st, log)
+                print(f"retries = {st['retries']}")
+            except (IndexError, ValueError):
+                print("usage: retries <number>")
         elif cmd in PATTERNS:
             run_pattern(cmd, parts[1:], st, log)
         else:
@@ -220,6 +254,8 @@ def main():
     ap.add_argument("--dry", action="store_true", help="no UDP, print hex dump")
     ap.add_argument("--log", dest="logfile", default="ledsender.log",
                     help="packet log file (default ./ledsender.log, '-' = no logging)")
+    ap.add_argument("--retries", type=int, default=2,
+                    help="resend frame if no 0x80 came back (default 2, 0 = off)")
     ap.add_argument("pattern", nargs="?", choices=PATTERNS, help="omitted -> interactive menu")
     ap.add_argument("colors", nargs="*", help="colors as rrggbb")
     a = ap.parse_args()
@@ -231,12 +267,13 @@ def main():
 
     st = {"host": a.host or "127.0.0.1", "port": a.port, "leds": a.leds,
           "fps": a.fps, "loop": a.loop, "frames": a.frames, "dry": a.dry,
-          "sender": None}
+          "retries": max(0, a.retries), "sender": None}
     if not a.dry:
-        st["sender"] = Sender(st["host"], st["port"], log)
+        st["sender"] = make_sender(st, log)
 
     if a.pattern:
-        print(f"pattern={a.pattern} leds={a.leds} port={a.port} fps={a.fps} log={a.logfile}")
+        print(f"pattern={a.pattern} leds={a.leds} port={a.port} fps={a.fps} "
+              f"retries={a.retries} log={a.logfile}")
         run_pattern(a.pattern, a.colors, st, log)
     else:
         if not a.host:
