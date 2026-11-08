@@ -15,6 +15,7 @@
 
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
+#include <Esp.h>
 #include <FastLED.h>
 #include "config.h"
 
@@ -40,8 +41,8 @@ static int parseHyperion(const uint8_t *buf, int len) {
   if (colors > LED_COUNT) colors = LED_COUNT;  // truncate too-long frames
 
   uint8_t sum = 0;
-  for (int i = 0; i < off; i++) sum += buf[i];
-  for (int i = 0; i < colors * 3; i++) sum += buf[off + i];
+  for (int i = 0; i < 3; i++) sum += buf[i];        // header without checksum byte
+  for (int i = off; i < off + colors * 3; i++) sum += buf[i];
   if (sum != buf[3]) return 0;  // wrong checksum
 
   return colors;
@@ -59,10 +60,29 @@ static void renderFrame(const uint8_t *rgb, int colors) {
   }
 }
 
+/* -------- WLAN-Statusdrucken -------- */
+
+// wl_status_t codes of the ESP8266 core, see wl_definitions.h
+static void printWifiDiag() {
+  int st = WiFi.status();
+  Serial.print("WiFi status=");
+  Serial.print(st);
+  switch (st) {
+    case 0: Serial.println(" (idle/still trying)"); break;
+    case 1: Serial.println(" (SSID not found!)"); break;
+    case 3: Serial.println(" (CONNECTED)"); break;
+    case 4: Serial.println(" (connect failed)"); break;
+    case 5: Serial.println(" (connection lost)"); break;
+    case 6: Serial.println(" (WRONG PASSWORD!)"); break;
+    default: Serial.println(" (?)"); break;
+  }
+}
+
 /* -------- Setup / Loop -------- */
 
 void setup() {
   Serial.begin(115200);
+  Serial.println("== Hanawa Leuchter boot ==");
 
   // APA102 stripe over SPI; pins configurable in config.h
   FastLED.addLeds<APA102, LED_SPI_DATA_PIN, LED_SPI_CLOCK_PIN, RGB>(
@@ -70,12 +90,18 @@ void setup() {
   FastLED.setBrightness(MAX_BRIGHTNESS);
 
   WiFi.begin(WIFI_NET, WIFI_PASS);
-  Serial.print("WLAN connect...");
+  Serial.println("WLAN connect...");
+  uint8_t dots = 0;
   while (!WiFi.isConnected()) {
-    delay(250);
-    Serial.print(".");
+    delay(500);
+    Serial.println(".");
+    if (++dots % 8 == 0) printWifiDiag();
+    if (dots >= 40) {
+      Serial.println("WLAN FAILED after 20s - reboot, check secrets.h!");
+      ESP.restart();
+    }
   }
-  Serial.println();
+  printWifiDiag();
   Serial.print("local IP: ");
   Serial.println(WiFi.localIP());
 
