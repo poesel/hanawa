@@ -277,8 +277,11 @@ def main():
         st["sender"] = make_sender(st, log)
 
     if a.pattern:
-        print(f"pattern={a.pattern} leds={a.leds} port={a.port} fps={a.fps} "
-              f"retries={a.retries} log={a.logfile}")
+        if not a.host and not a.dry:
+            print(f"WARNING: no --host given, sending to {st['host']}:{a.port} "
+                  f"(probably wrong - add --host <ESP-IP>)")
+        print(f"pattern={a.pattern} host={st['host']}:{a.port} leds={a.leds} "
+              f"fps={a.fps} retries={a.retries} log={a.logfile}")
         run_pattern(a.pattern, a.colors, st, log)
     else:
         if not a.host:
