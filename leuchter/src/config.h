@@ -27,9 +27,10 @@
 
 #define MAX_BRIGHTNESS 200              // FastLED global brightness (0..255)
 
-/* LED-SPI-Pins (Wemos D1 mini: D0=GPIO16, D1=GPIO5) */
-#define LED_SPI_DATA_PIN   16
-#define LED_SPI_CLOCK_PIN  5
+/* LED-SPI-Pins: physical stripe is wired to the D1 mini's standard SPI pins
+   (same wiring as sucher2/leuchter: D7=GPIO13=MOSI/DATA, D5=GPIO14=SCK/CLOCK) */
+#define LED_SPI_DATA_PIN   13
+#define LED_SPI_CLOCK_PIN  14
 
 /* Hyperion health/sync byte */
 #define HEALTH_BYTE   0x80

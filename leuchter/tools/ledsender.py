@@ -140,6 +140,11 @@ class Sender:
 
 def run_pattern(name, args, st, log):
     """Send frames of one pattern; returns after st.frames (or forever if loop)."""
+    need = {"solid": 1, "chase": 1, "blink": 1, "fade": 2}.get(name, 0)
+    if name in ("solid", "chase", "fade"):  # blink may omit its color
+        if len(args) < need:
+            print(f"usage: {name} <colors as rrggbb> (need {need}, got {len(args)})")
+            return
     step = 0
     while True:
         leds = make_colors(name, args, st["leds"], step)
