@@ -6,7 +6,7 @@ Ambientes Licht rund um Deinen Fernseher, das sich automatisch an die Bildschirm
 
 Das Projekt besteht aus zwei Teilen:
 - **Sucher**: ESP32CAM, der den Fernseher beobachtet und Farben analysiert
-- **Leuchter**: ESP32 mit LED-Lichterkette, der die Farbdaten umsetzt
+- **Leuchter**: ESP8266 mit LED-Lichterkette, der die Farbdaten umsetzt
 
 ## Hardware-Anforderungen
 
@@ -15,8 +15,8 @@ Das Projekt besteht aus zwei Teilen:
 - USB-zu-TTL Konverter für Programmierung
 - WLAN-Verbindung
 
-### Leuchter (ESP32)
-- ESP32 Development Board
+### Leuchter (ESP8266)
+- ESP8266 Development Board
 - APA102 LED-Streifen (mindestens 60 LEDs empfohlen)
 - 5V Stromversorgung für LEDs
 - WLAN-Verbindung
@@ -79,7 +79,7 @@ Im großen Viereck werden kleine Vierecke gezeichnet, die mindestens eine Seite 
 ## Leuchter - Konfiguration
 
 ### Hardware-Setup
-1. ESP32 mit Stromversorgung verbinden
+1. ESP8266 mit Stromversorgung verbinden
 2. APA102 LED-Streifen an ESP32 anschließen:
    - DATA: GPIO 23
    - CLOCK: GPIO 18

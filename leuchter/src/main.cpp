@@ -1,0 +1,122 @@
+/*
+ * Hanawa Leuchter - UDP LED-Empfang for ESP8266 (Wemos D1 mini)
+ *
+ * Receives color frames via UDP from a sender (Sucher or test-program),
+ * applies them to the APA102 LED stripe and sends back the health byte
+ * 0x80 after every applied frame (frame-sync for the sender).
+ *
+ * Hyperion UDP LED protocol (n = LED_COUNT LEDs):
+ *   [0] 0xAA  (magic)
+ *   [1] 0x00  (no command) / 0xAB (command byte follows at [4])
+ *   [2] 0xFF  (magic)
+ *   [3] checksum: low byte of sum(bytes[0..2] + all color bytes)
+ *   [4..] R G B per LED (with 0xAB: starting at [5])
+ */
+
+#include <ESP8266WiFi.h>
+#include <WiFiUdp.h>
+#include <FastLED.h>
+#include "config.h"
+
+WiFiUDP udp;      // receives at UDP_PORT
+WiFiUDP ack;      // sends health byte back to the sender
+
+CRGB leds[LED_COUNT];
+uint8_t rxbuf[UDP_BUF_RX];
+
+/* -------- Hyperion-Protokol -------- */
+
+// Validate header and checksum. Returns number of RGB triplets, 0 = invalid.
+static int parseHyperion(const uint8_t *buf, int len) {
+  if (len < 5) return 0;
+  if (buf[0] != 0xAA || buf[2] != 0xFF) return 0;
+
+  int off = 4;
+  if (buf[1] == 0xAB) off = 5;  // skip command byte
+  else if (buf[1] != 0x00) return 0;
+
+  int colors = (len - off) / 3;
+  if (colors <= 0) return 0;
+  if (colors > LED_COUNT) colors = LED_COUNT;  // truncate too-long frames
+
+  uint8_t sum = 0;
+  for (int i = 0; i < off; i++) sum += buf[i];
+  for (int i = 0; i < colors * 3; i++) sum += buf[off + i];
+  if (sum != buf[3]) return 0;  // wrong checksum
+
+  return colors;
+}
+
+/* -------- FastLED -------- */
+
+static void renderFrame(const uint8_t *rgb, int colors) {
+  for (int i = 0; i < LED_COUNT; i++) {
+    if (i < colors) {
+      leds[i] = CRGB(rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
+    } else {
+      leds[i] = CRGB(0, 0, 0);  // not-sent LEDs stay black
+    }
+  }
+}
+
+/* -------- Setup / Loop -------- */
+
+void setup() {
+  Serial.begin(115200);
+
+  // APA102 stripe over SPI; pins configurable in config.h
+  FastLED.addLeds<APA102, LED_SPI_DATA_PIN, LED_SPI_CLOCK_PIN, RGB>(
+      leds, LED_COUNT);
+  FastLED.setBrightness(MAX_BRIGHTNESS);
+
+  WiFi.begin(WIFI_NET, WIFI_PASS);
+  Serial.print("WLAN connect...");
+  while (!WiFi.isConnected()) {
+    delay(250);
+    Serial.print(".");
+  }
+  Serial.println();
+  Serial.print("local IP: ");
+  Serial.println(WiFi.localIP());
+
+  if (!udp.begin(UDP_PORT)) {
+    Serial.println("UDP port failed, halt");
+    while (true) delay(1000);
+  }
+  Serial.print("listening for UDP at :");
+  Serial.println(UDP_PORT);
+}
+
+void loop() {
+  int len = udp.parsePacket();
+  if (len <= 0) {
+    delay(1);
+    return;
+  }
+
+  // one datagram max UDP_BUF_RX bytes, read it completely
+  if (len > UDP_BUF_RX) len = UDP_BUF_RX;
+  int got = udp.read(rxbuf, len);
+
+  // remember sender so the health byte can go back to him
+  IPAddress sender = udp.remoteIP();
+  uint16_t sport = udp.remotePort();
+
+  int colors = parseHyperion(rxbuf, got);
+  if (colors == 0) {
+    Serial.print("invalid UDP packet (");
+    Serial.print(got);
+    Serial.println(" bytes), rejected");
+  } else {
+    renderFrame(rxbuf + 4, colors);
+    FastLED.show();
+    ack.beginPacket(sender, sport);
+    ack.write(HEALTH_BYTE);
+    ack.endPacket();
+    Serial.print("frame: ");
+    Serial.print(colors);
+    Serial.println(" LEDs -> ack 0x80");
+  }
+
+  delay(1);
+}

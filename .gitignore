@@ -207,3 +207,9 @@ marimo/_lsp/
 __marimo__/
 
 .DS_Store
+
+# PlatformIO build/lib cache
+.pio/
+
+# Hanawa Leuchter: WLAN credentials must never be committed
+leuchter/src/secrets.h

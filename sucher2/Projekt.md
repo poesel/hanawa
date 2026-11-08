@@ -101,7 +101,7 @@ Die LEDs werden hinter dem Fernseher im Uhrzeigersinn angebracht:
 
 Das Projekt besteht aus zwei Teilen: dem Sucher, der den Fernseher beobachtet und die Farben ausrechnet und dem Leuchter, der die Farbdaten empfängt und den Fernseher beleuchtet.
 
-Beide Programme werden in der Arduino IDE programmiert und von dort auf die Microcontroller hochgeladen. Die Microcontroller erhalten eine feste IP im WLAN.
+Die Microcontroller erhalten eine feste IP im WLAN.
 Die IP wird im Program festgelegt.
 
 Der Leuchter besteht aus einem ESP32 der eine LED Lichterkette ansteuert. Die LEDs sind vom Typ APA102.
