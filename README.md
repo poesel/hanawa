@@ -16,8 +16,8 @@ Das Projekt besteht aus zwei Teilen:
 - WLAN-Verbindung
 
 ### Leuchter (ESP8266)
-- ESP8266 Development Board
-- APA102 LED-Streifen (mindestens 60 LEDs empfohlen)
+- ESP8266 Development Board (Wemos D1 mini v2.1.0)
+- APA102 LED-Streifen (42 LEDs)
 - 5V Stromversorgung für LEDs
 - WLAN-Verbindung
 
@@ -39,10 +39,15 @@ Das Projekt besteht aus zwei Teilen:
 - ArduinoJson
 ```
 
+Der Leuchter (ESP8266) uses no FastLED: the APA102 driver is handwritten
+(`leuchter/src/apa102.h/.cpp`) and uses the ESP8266's fixed HSPI unit; FastLED
+never reached the stripe and was dropped.
+
 ### 3. WLAN-Konfiguration
 Die IP-Adressen werden im Programm festgelegt:
 - Sucher: `192.168.1.100`
 - Leuchter: `192.168.1.101`
+- Leuchter, aktuella IP printed in the boot-Console: `192.168.0.107` (IP the Router assigned)
 
 **Wichtig**: Stelle sicher, dass dein Router diese IPs nicht vergibt.
 
@@ -123,7 +128,7 @@ Sucher und Leuchter kommunizieren per WLAN miteinander.
 
 ## Leuchter
 
-Der Leuchter besteht aus einem ESP32 der eine LED Lichterkette ansteuert. Die LEDs sind vom Typ APA102.
+Der Leuchter besteht aus einem ESP8266 (Wemos D1 mini v2.1.0) der eine LED Lichterkette ansteuert. Die LEDs sind vom Typ APA102 (42 LEDs).
 
 Die LEDS werden hinter dem Fernseher am Rand angebracht. Die Zählung der LEDs beginnt in der linken, oberen Ecke und verläuft im Uhrzeigersinn. +
 Es wird definiert, wieviele LEDs horizontal und vertikal vorhanden sind.

@@ -4,9 +4,14 @@ Der **Leuchter** empfängt per-LED colors on the ESP8266 via UDP (Hyperion-Proto
 
 ## Hardware
 
-- ESP8266 (Wemos D1 mini) with APA102 LED stripe, connected via **SPI** to the ESP:
-  - data pin: `LED_SPI_DATA_PIN` = GPIO16 (D0)
-  - clock pin: `LED_SPI_CLOCK_PIN` = GPIO5 (D1)
+- ESP8266 (**Wemos D1 mini v2.1.0**) with an **APA102 LED stripe** (42 LEDs), driven
+  over the ESP's built-in **SPI/HSPI unit**, which is fixed to two pads:
+  - clock wire → `GPIO14` (pad **D5**)
+  - data wire → `GPIO13` (pad **D7**)
+
+  The stripe's two wires are connected in exactly that arrangement. (Measured with
+  `probe_pins/`: originally they sat the other way round, and the stripe's wires
+  have since been swapped - the HSPI unit is not re-targetable, see PLAN.md.)
 - 5V supply for the ESP, separate PSU for the LEDs, WLAN network with the Sucher.
 
 ## Setup
@@ -21,24 +26,47 @@ cp src/secrets.h.example src/secrets.h   # then edit SSID + password
 Other settings in `src/config.h`:
 
 ```c
-#define LED_COUNT     60            // n < 100, must match the sender
+#define LED_COUNT     42            // n < 100, must match the sender
 #define UDP_PORT      1900          // Hyperion default
 ```
 
+`LED_COUNT` is also passed as a build flag in `platformio.ini`
+(`-DLED_COUNT=42`), and that define wins over `config.h` - change both places
+together, otherwise the receiver truncates the frame and rejects it over a
+checksum mismatch.
+
 ## Building and flashing
 
-PlatformIO via the virtualenv in the repo root (system-pip is locked):
+PlatformIO via the virtualenv in the repo root (system-pip is locked). Accessing the
+serial device `/dev/ttyUSB0` needs the `dialout` group - if the group change is not
+active in the current shell, wrap the command in `sg dialout "..."`:
 
 ```bash
-cd ..              # repo root
-.venv/bin/pio pkg install          # first time only
-cd leuchter
-../.venv/bin/pio run               # compile
-../.venv/bin/pio run -a upload     # flash ESP8266 (D1 mini, eboot)
-../.venv/bin/pio run -a device     # monitor ESP
+cd ..
+.venv/bin/pio run -d leuchter                        # compile
+sg dialout "/home/.../.venv/bin/pio run -d leuchter -t upload"   # flash (eboot)
 ```
 
-At startup the ESP prints: WLAN connect, local IP, "listening for UDP at :1900".
+`-d leuchter` selects the main environment (`env.d1mini`); helper sketches need
+`-d leuchter/<dir> -e <env>` (see the table below).
+
+At startup the ESP prints a boot banner, initialises the stripe, runs a **boot test
+cycle** (white → red → green → blue → off, 1.5 s each - the fastest proof that the
+SPI writes reach the stripe), then reports WLAN status (`3 = CONNECTED`,
+`1 = SSID not found`, `6 = WRONG PASSWORD`) and "listening for UDP at :1900".
+
+## Helper sketches for hardware debugging
+
+Two throw-away sub-projects sit next to the sketch; each has its own
+`platformio.ini` and can be flashed with `pio run -d <dir> -e <env> -t upload`:
+
+| Directory | Purpose |
+|---|---|
+| `test_apa102/` | SPI + APA102 only (no WiFi, no UDP): endless `white → red → off → green → blue → off` cycle, 2 Hz. Proves whether the stripe reacts to the ESP's SPI writes at all. |
+| `probe_pins/` | Bit-bangs a native APA102 frame to **every** GPIO pair the D1 mini exposes and shows a different (colour, number of lit LEDs) per pair, printed to stdout as well. Used to find out on which physical pads the stripe really sits (the D1 mini v2 generation does not necessarily keep the GPIO numbering of the older boards). |
+
+The stripe keeps its last valid frame over a re-flash, so an "always on"
+stripe does not prove that the current firmware writes to it.
 
 ## UDP protocol (Hyperion-compatible)
 
@@ -53,10 +81,10 @@ See [PLAN.md](PLAN.md). Short version:
 `tools/ledsender.py` (Python 3, stdlib only):
 
 ```bash
-./tools/ledsender.py --host 192.168.1.101 solid ff0000
-./tools/ledsender.py --host 192.168.1.101 --fps 25 --loop rainbow
-./tools/ledsender.py --host 192.168.1.101 --leds 60 fade ff0000 0000ff
-./tools/ledsender.py --host 192.168.1.101 chase 00ff00
+./tools/ledsender.py --host 192.168.0.107 solid ff0000     # --leds defaults to 42
+./tools/ledsender.py --host 192.168.0.107 --fps 25 --loop rainbow
+./tools/ledsender.py --host 192.168.0.107 --leds 42 fade ff0000 0000ff
+./tools/ledsender.py --host 192.168.0.107 chase 00ff00
 ```
 
 Patterns: `solid`, `rainbow`, `fade`, `chase`, `blink`, `random`, `off`;
@@ -88,5 +116,16 @@ UDP receiver on port 1900 which answers `0x80` and use `--host 127.0.0.1`.
 
 - "UDP port failed": port 1900 conflict or socket exhaustion on the ESP.
 - Ack times > 50 ms: usually WLAN hiccup, not UDP.
-- Checksum mismatch between `ledsender.py` and a sender: ensure `--leds` and
-  `LED_COUNT` match the number of RGB triplets sent.
+- ESP prints `invalid UDP packet (N bytes), rejected` and `ledsender.py` reports
+  `NO health byte`: the LED count disagrees - `--leds` must equal the `LED_COUNT`
+  the *flashed* binary was built with (see the `platformio.ini` build-flag gotcha).
+- Stripe does not change color although acks are fine: the stripe keeps its last
+  valid frame across re-flashes, so re-run the boot test cycle (white/red/green/blue)
+  and check that the clock wire is really on GPIO14 (D5) and the data wire on
+  GPIO13 (D7).
+- Watching the ESP's console: `tools/serialwatch.py` (needs pyserial from the
+  repo's `.venv` plus the `dialout` group):
+
+  ```bash
+  sg dialout "/home/markus/Projekte/Hanawa/.venv/bin/python -u leuchter/tools/serialwatch.py --secs 20"
+  ```

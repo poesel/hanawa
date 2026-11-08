@@ -16,13 +16,13 @@
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
 #include <Esp.h>
-#include <FastLED.h>
+#include "apa102.h"
 #include "config.h"
 
 WiFiUDP udp;      // receives at UDP_PORT
 WiFiUDP ack;      // sends health byte back to the sender
 
-CRGB leds[LED_COUNT];
+APA102 stripe;
 uint8_t rxbuf[UDP_BUF_RX];
 
 /* -------- Hyperion-Protokol -------- */
@@ -53,9 +53,9 @@ static int parseHyperion(const uint8_t *buf, int len) {
 static void renderFrame(const uint8_t *rgb, int colors) {
   for (int i = 0; i < LED_COUNT; i++) {
     if (i < colors) {
-      leds[i] = CRGB(rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
+      stripe.setPixel(i, rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
     } else {
-      leds[i] = CRGB(0, 0, 0);  // not-sent LEDs stay black
+      stripe.setPixel(i, 0, 0, 0);  // not-sent LEDs stay black
     }
   }
 }
@@ -84,10 +84,22 @@ void setup() {
   Serial.begin(115200);
   Serial.println("== Hanawa Leuchter boot ==");
 
-  // APA102 stripe over SPI; pins configurable in config.h
-  FastLED.addLeds<APA102, LED_SPI_DATA_PIN, LED_SPI_CLOCK_PIN, RGB>(
-      leds, LED_COUNT);
-  FastLED.setBrightness(MAX_BRIGHTNESS);
+  // native APA102 stripe via HSPI (SCK=GPIO14/D5, MOSI=GPIO13/D7)
+  stripe.begin(LED_COUNT);
+  stripe.setBrightness(LED_BRIGHTNESS);   // 0..31
+
+  // Boot-Testcycle: shows if the SPI-Write reaches the stripe
+  Serial.println("LED test cycle: white/red/green/blue/off (1.5s each)");
+  for (int i = 0; i < LED_COUNT; i++) stripe.setPixel(i, 255, 255, 255);
+  stripe.show(); delay(1500);
+  for (int i = 0; i < LED_COUNT; i++) stripe.setPixel(i, 255, 0, 0);
+  stripe.show(); delay(1500);
+  for (int i = 0; i < LED_COUNT; i++) stripe.setPixel(i, 0, 255, 0);
+  stripe.show(); delay(1500);
+  for (int i = 0; i < LED_COUNT; i++) stripe.setPixel(i, 0, 0, 255);
+  stripe.show(); delay(1500);
+  stripe.clear(); stripe.show();
+  Serial.println("test cycle done");
 
   WiFi.begin(WIFI_NET, WIFI_PASS);
   Serial.println("WLAN connect...");
@@ -135,7 +147,7 @@ void loop() {
     Serial.println(" bytes), rejected");
   } else {
     renderFrame(rxbuf + 4, colors);
-    FastLED.show();
+    stripe.show();
     ack.beginPacket(sender, sport);
     ack.write(HEALTH_BYTE);
     ack.endPacket();

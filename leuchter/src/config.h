@@ -19,18 +19,18 @@
 
 /* ---------------- LEDs ---------------- */
 #ifndef LED_COUNT
-#define LED_COUNT     60                // n < 100!
+#define LED_COUNT     42                // physical stripe length (n < 100!)
 #endif
 #if LED_COUNT >= 100
 #error "LED_COUNT must be < 100"
 #endif
 
-#define MAX_BRIGHTNESS 200              // FastLED global brightness (0..255)
-
-/* LED-SPI-Pins: physical stripe is wired to the D1 mini's standard SPI pins
-   (same wiring as sucher2/leuchter: D7=GPIO13=MOSI/DATA, D5=GPIO14=SCK/CLOCK) */
-#define LED_SPI_DATA_PIN   13
-#define LED_SPI_CLOCK_PIN  14
+/* Stripe wiring: native APA102 frames over the ESP8266's fixed HSPI unit,
+   CLOCK = GPIO14, DATA = GPIO13. The stripe's two wires are connected so that
+   the clock wire lands on GPIO14; measured with the GPIO probe in probe_pins/
+   (before the wires were swapped it sat the other way round, which the
+   hardware SPI unit cannot use). */
+#define LED_BRIGHTNESS     31               // APA102 global brightness (0..31)
 
 /* Hyperion health/sync byte */
 #define HEALTH_BYTE   0x80

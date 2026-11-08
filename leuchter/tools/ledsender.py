@@ -252,7 +252,7 @@ def main():
     ap = argparse.ArgumentParser(description="Send Hyperion UDP color frames to the Leuchter")
     ap.add_argument("--host", help="Leuchter IP")
     ap.add_argument("--port", type=int, default=1900)
-    ap.add_argument("--leds", type=int, default=60)
+    ap.add_argument("--leds", type=int, default=42)
     ap.add_argument("--fps", type=float, default=10.0)
     ap.add_argument("--loop", action="store_true", help="run forever")
     ap.add_argument("--frames", type=int, default=20, help="frames per run (default 20)")

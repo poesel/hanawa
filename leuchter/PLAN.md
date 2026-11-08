@@ -56,7 +56,13 @@ leuchter/
 ### ESP sketch (C++ / Arduino, ESP8261 core)
 
 - `WiFi.h` + `WiFiUDP.h` (from the ESP8261 core, also used by the classic "ESP8261 Ambient Light" sketches).
-- LEDs driven by **FastLED** (n = 60 default, max 99; `strip.begin()` / `show()`); APA102 supported by FastLED. Fallback to a hand-written RGB buffer to save RAM if FastLED proves too heavy.
+- LEDs driven by a **hand-written APA102 driver** (`src/apa102.h/.cpp`, a port of the
+  proven driver in `sucher2/leuchter`: core `SPI.begin()` on the ESP8266 HSPI pads
+  GPIO14=SCK / GPIO13=MOSI, native APA102 frames, brightness 0..31) — FastLED was
+  dropped because its ESP8266-HSPI path never reached the stripe (see notes below).
+  `LED_COUNT` is **42** (the physical stripe length), max 99. The stripe's two wires
+  are connected so that the clock wire sits on GPIO14 (D5) and the data wire on
+  GPIO13 (D7); the HSPI unit is fixed to those pads and cannot be re-targeted.
 - `loop()` is completely UDP-driven: `beginReceive`/`nextPacket` with ring logic, frame render, single `0x80` byte back on the same UDP connection.
 - Optional brightness define `MAX_BRIGHTNESS` for all LEDs.
 - Simple status web page (same `WebServer` as in `sucher/`) for debugging — optional.
@@ -65,7 +71,7 @@ leuchter/
 
 Terminal program: build Hyperion UDP frames, send them to the ESP via `socket`, wait for the `0x80` reply (and report if missing) for each frame.
 
-- CLI: `python3 ledsender.py --host <ip> --port 1900 --leds 60 <pattern> [args]`
+- CLI: `python3 ledsender.py --host <ip> --port 1900 --leds 42 <pattern> [args]`
 - Patterns: `solid <#rrggbb>`, `rainbow`, `fade <#a> <#b>`, `chase <#c>`, `blink`, `random`, `off`
 - `--loop` / `--fps <n>` for continuous playback
 - Reports round-trip latency from the `0x80` health byte (nice for debugging)
@@ -76,7 +82,7 @@ Terminal program: build Hyperion UDP frames, send them to the ESP via `socket`, 
 |-------|-------------------|
 | PlatformIO Core (`pio`) | ✅ `pip install platformio` — network + pip available; `sucher/` was already built with PlatformIO, so it works or is present in some environment |
 | ESP8261 core for Arduino (community PlatformIO platform `esp8261`) | ✅ pulled automatically by `pio platform install esp8261` at build time |
-| FastLED | ✅ pulled by `pio device install --library fastled` |
+| FastLED | ⚠️ installed but **not used** — dropped from `platformio.ini` (`lib_deps` empty) after it failed to reach the stripe |
 | Python 3 | ✅ already installed |
 
 Nothing blocks as install issue — no need to ask about missing software.
@@ -87,10 +93,12 @@ Nothing blocks as install issue — no need to ask about missing software.
 - [x] 2. `config.h`: WiFi + `LED_COUNT` + UDP port (default **1900**)
 - [x] 3. ESP sketch: WiFi connect, `WiFiUDP` receive loop
 - [x] 4. Hyperion protocol parser (magic + checksum)
-- [x] 5. FastLED setup + frame render
+- [x] 5. LED driver: FastLED setup → replaced by ported APA102 class + frame render
 - [x] 6. Health reply `0x80` after each frame
 - [x] 7. `ledsender.py` with patterns (incl. full UDP round-trip test on PC)
-- [ ] 8. Compile done ✅ (Flash 26 %, RAM 36 %); flash-test on real ESP8266 pending
+- [x] 8. Compile + flash done ✅ (Flash 26.2 %, RAM 35.5 %); verified on the real
+      ESP8266: `ledsender.py --leds 42` gets `0x80` acks in ~5 ms and the stripe
+      visibly follows red → green → blue → off
 - [x] 9. Write `leuchter/README.md`
 - [x] 10. Fix root `README.md`: "Leuchter (ESP32)" → "Leuchter (ESP8266)"
 
@@ -103,8 +111,28 @@ Nothing blocks as install issue — no need to ask about missing software.
 - API changes in the core: `WiFi.begin()`, `WiFi.isConnected()`, `WiFiUDP::begin(port)`
   + `parsePacket()` (not beginReceive), `remoteIP()`/`remotePort()` → health byte goes
   back to the sender. Header is `<WiFiUdp.h>` (lowercase d).
-- FastLED: registry resolves to **3.10.9**; `FastLED.addLeds<APA102, D0, D1, RGB>` +
-  `setBrightness()`, APA102 over SPI (data GPIO16, clock GPIO5, RAW pin order).
+- FastLED was tried first and **abandoned**: registry resolves to **3.10.9**;
+  `FastLED.addLeds<APA102, …, RGB>` with `FASTLED_ESP8266_RAW_PIN_ORDER`
+  (data GPIO16 / clock GPIO5 and also the HSPI pads) compiled but never reached
+  the stripe. `lib_deps` is now empty and FastLED is not linked in at all.
+- LED driver: port of the proven `APA102` class from `sucher2/leuchter`, which
+  uses the ESP8266's built-in **HSPI unit** (fixed pads, `SPI.begin()` =
+  SCK=GPIO14/D5, MOSI=GPIO13/D7; the core `SPIClass` refuses any other pin
+  combination).
+- Board is a **D1 mini v2.1.0** (ESP8266). The v2 pads are labelled only `D0…D8`
+  + `LED`; no authoritative GPIO map for that generation was found online, so
+  the physical position of the stripe was established empirically with
+  `probe_pins/` (bit-bangs a native APA102 frame to all 110 ordered GPIO pairs,
+  each pair encodes a unique colour/lit-LED count). It measured the stripe at
+  clock=GPIO13 / data=GPIO14, i.e. **swapped** against HSPI. The stripe's two
+  wires have since been **swapped** so that clock sits on GPIO14 and data on
+  GPIO13, which lets the hardware HSPI (and the old driver) be used again.
+  The bit-bang variant that made the swapped wiring work is kept in git history
+  (`src/apa102.cpp` history) and documented in `probe_pins/`.
+- Gotcha: `LED_COUNT` is also passed as a build flag in `platformio.ini`
+  (`-DLED_COUNT=42`); that define beats the `#ifndef LED_COUNT` fallback in
+  `src/config.h`, so both places have to be changed together. A stale
+  `LED_COUNT=40` makes the receiver reject 42-LED frames (truncated checksum).
 - Python 3.13 venv at repo root (`.venv/`, git-ignored), system pip PEP 668 locked.
 
 ## Open questions (ask before implementation)
