@@ -35,4 +35,15 @@
 /* Hyperion health/sync byte */
 #define HEALTH_BYTE   0x80
 
+/* ---------------- OTA ---------------- */
+/* ArduinoOTA listens on this port (default 8266) and offers the compiled
+   sketch over WLAN; see README.md for the upload command. No password, so
+   any device on the LAN that knows the hostname could flash it. */
+#ifndef OTA_HOSTNAME
+#define OTA_HOSTNAME  "hanawa-leuchter"
+#endif
+#ifndef OTA_PORT
+#define OTA_PORT      8266
+#endif
+
 #endif // LEUCHTER_CONFIG_H

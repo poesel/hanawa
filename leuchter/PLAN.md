@@ -101,6 +101,9 @@ Nothing blocks as install issue — no need to ask about missing software.
       visibly follows red → green → blue → off
 - [x] 9. Write `leuchter/README.md`
 - [x] 10. Fix root `README.md`: "Leuchter (ESP32)" → "Leuchter (ESP8266)"
+- [x] 11. OTA: ArduinoOTA wired into the sketch + `env:ota` (`upload_protocol = espota`),
+      upload plumbing verified; the one-time serial flash that installs the first
+      OTA-capable build is still pending (no `/dev/ttyUSB0` connected)
 
 ### Implementation notes / deviations from plan
 
@@ -133,6 +136,17 @@ Nothing blocks as install issue — no need to ask about missing software.
   (`-DLED_COUNT=42`); that define beats the `#ifndef LED_COUNT` fallback in
   `src/config.h`, so both places have to be changed together. A stale
   `LED_COUNT=40` makes the receiver reject 42-LED frames (truncated checksum).
+- OTA: the sketch runs `ArduinoOTA` (version 1.0, bundled in the ESP8266 core, no
+  extra `lib_deps`), hostname `hanawa-leuchter`, port 8266, **no password**.
+  `platformio.ini` has a second environment `env:ota` with
+  `upload_protocol = espota`, so `pio run -d leuchter -e ota -t upload
+  --upload-port <ESP-IP>` pushes the built `.bin` over WLAN (espota.py
+  announces itself on a random local port and invites the ESP). Verified plumbing;
+  the ESP's current firmware has no OTA listener, so the first OTA-capable build
+  still must go over serial (`AVAILABLE: espota, esptool` for this board).
+  Costs measured on this project: +46 KB flash / +630 B RAM, build 320,388 B
+  (30.7 % of flash) - ArduinoOTA writes the new sketch into the free flash behind
+  the running one, so `old + new` has to stay below ~1 MB.
 - Python 3.13 venv at repo root (`.venv/`, git-ignored), system pip PEP 668 locked.
 
 ## Open questions (ask before implementation)

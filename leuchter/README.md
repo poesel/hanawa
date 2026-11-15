@@ -55,6 +55,35 @@ cycle** (white → red → green → blue → off, 1.5 s each - the fastest proo
 SPI writes reach the stripe), then reports WLAN status (`3 = CONNECTED`,
 `1 = SSID not found`, `6 = WRONG PASSWORD`) and "listening for UDP at :1900".
 
+## OTA (Over-The-Air updates)
+
+The sketch carries `ArduinoOTA` (bundled in the ESP8266 core), so after **one last
+serial flash** new builds can be pushed over WLAN - no cable, no `sg dialout`:
+
+```bash
+cd ..
+.venv/bin/pio run -d leuchter -e d1mini -t upload   # once, needs /dev/ttyUSB0
+.venv/bin/pio run -d leuchter -e ota -t upload --upload-port 192.168.0.107
+```
+
+`env:ota` is the same sources with `upload_protocol = espota`; the ESP's IP is
+printed on its console at boot. ArduinoOTA listens on its own port **8266**
+(`OTA_PORT` in `config.h`), so it does not clash with the UDP receiver at
+`:1900`. Expect the ESP's console to print `OTA start: sketch`, progress,
+`OTA finished, rebooting into new sketch` and then the normal boot banner of
+the new build.
+
+Caveats:
+
+- The build that is currently on the ESP has no `ArduinoOTA`, so it cannot be
+  replaced over the network - the chicken-and-egg first upload must be serial.
+- No `setPassword()`/`setPasswordHash()` is used, so any device on the LAN that
+  knows the hostname `hanawa-leuchter` can flash it.
+- ArduinoOTA writes the new sketch into the free flash **behind** the running
+  one, so both copies have to fit (`ESP.getSketchSize() + new ≤ ~1 MB`). With
+  OTA support the build sits at ~320 KB, i.e. keep it below roughly 500 KB.
+- Cost of OTA support: ~46 KB flash, ~600 B RAM (30.7 % of flash in total).
+- A failed upload leaves the old sketch running; the ESP is not bricked.
 ## Helper sketches for hardware debugging
 
 Two throw-away sub-projects sit next to the sketch; each has its own

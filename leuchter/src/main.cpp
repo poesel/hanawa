@@ -16,6 +16,7 @@
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
 #include <Esp.h>
+#include <ArduinoOTA.h>
 #include "apa102.h"
 #include "config.h"
 
@@ -123,9 +124,30 @@ void setup() {
   }
   Serial.print("listening for UDP at :");
   Serial.println(UDP_PORT);
+
+  // OTA: new versions of this sketch are pushed over WLAN (see README.md).
+  // The first OTA-capable build still has to be flashed over serial.
+  ArduinoOTA.setHostname(OTA_HOSTNAME);
+  ArduinoOTA.setPort(OTA_PORT);
+  ArduinoOTA.onStart([]() {
+    Serial.print("OTA start: ");
+    Serial.println(ArduinoOTA.getCommand() == U_FLASH ? "sketch" : "filesystem");
+  });
+  ArduinoOTA.onEnd([]() {
+    Serial.println("OTA finished, rebooting into new sketch");
+  });
+  ArduinoOTA.onError([](ota_error_t err) {
+    Serial.print("OTA error ");
+    Serial.println((int)err);
+  });
+  ArduinoOTA.begin();
+  Serial.print("OTA ready, upload to this ESP at :");
+  Serial.println(OTA_PORT);
 }
 
 void loop() {
+  ArduinoOTA.handle();  // no-op until an OTA upload arrives; also keeps mDNS alive
+
   int len = udp.parsePacket();
   if (len <= 0) {
     delay(1);
