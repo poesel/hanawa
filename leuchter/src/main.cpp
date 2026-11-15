@@ -6,16 +6,20 @@
  * 0x80 after every applied frame (frame-sync for the sender).
  *
  * Hyperion UDP LED protocol (n = number of RGB triplets in the datagram,
- *   up to MAX_RX_LEDS; the sender's --leds must be <= MAX_RX_LEDS):
+ *   up to MAX_LEDS; the sender's --leds must be <= MAX_LEDS):
  *   [0] 0xAA  (magic)
  *   [1] 0x00  (no command) / 0xAB (command byte follows at [4])
  *   [2] 0xFF  (magic)
  *   [3] checksum: low byte of sum(bytes[0..2] + all color bytes)
  *   [4..] R G B per LED (with 0xAB: starting at [5])
  *
- * The checksum always covers the whole received payload. Frames longer than
- * the physical stripe (LED_COUNT) are accepted, their checksum verified over
- * every triplet, and only the first LED_COUNT triplets are put on the stripe.
+ * The checksum always covers the whole received payload. The frame decides how
+ * many LEDs are addressed: a datagram with n triplets sends exactly n APA102
+ * LED blocks, so a stripe of any length up to MAX_LEDS works with the same
+ * binary. Blocks the stripe does not have are dropped by its connector; LEDs
+ * behind a frame that is shorter than the stripe stay black. An APA102 stripe
+ * cannot report its length to the ESP (SPI is one-way), which is why the length
+ * is never asked for.
  */
 
 #include <ESP8266WiFi.h>
@@ -34,7 +38,9 @@ uint8_t rxbuf[UDP_BUF_RX];
 /* -------- Hyperion-Protokol -------- */
 
 // Validate header and checksum. Returns number of RGB triplets, 0 = invalid.
-static int parseHyperion(const uint8_t *buf, int len) {
+// On success *rgb_out points at the first color byte (behind the optional
+// 0xAB command byte).
+static int parseHyperion(const uint8_t *buf, int len, const uint8_t **rgb_out) {
   if (len < 5) return 0;
   if (buf[0] != 0xAA || buf[2] != 0xFF) return 0;
 
@@ -44,29 +50,26 @@ static int parseHyperion(const uint8_t *buf, int len) {
 
   int colors = (len - off) / 3;
   if (colors <= 0) return 0;
-  if (colors > MAX_RX_LEDS) return 0;  // longer than the receive buffer allows
+  if (colors > MAX_LEDS) return 0;  // longer than the buffer/stripe capacity allows
 
   uint8_t sum = 0;
   for (int i = 0; i < 3; i++) sum += buf[i];        // header without checksum byte
   for (int i = off; i < off + colors * 3; i++) sum += buf[i];
   if (sum != buf[3]) return 0;  // wrong checksum
 
+  *rgb_out = buf + off;
   return colors;
 }
 
-/* -------- FastLED -------- */
+/* -------- LED frame -------- */
 
 static void renderFrame(const uint8_t *rgb, int colors) {
-  // Frames may carry more triplets than the stripe has; only the first
-  // LED_COUNT of them are shown, the rest is dropped (checksum still covered
-  // them in parseHyperion).
-  for (int i = 0; i < LED_COUNT; i++) {
-    if (i < colors) {
-      stripe.setPixel(i, rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
-    } else {
-      stripe.setPixel(i, 0, 0, 0);  // not-sent LEDs stay black
-    }
+  // The frame's own length is the number of LEDs addressed; nothing here knows
+  // the physical stripe length.
+  for (int i = 0; i < colors; i++) {
+    stripe.setPixel(i, rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
   }
+  stripe.setNumLeds(colors);
 }
 
 /* -------- WLAN-Statusdrucken -------- */
@@ -93,19 +96,22 @@ void setup() {
   Serial.begin(115200);
   Serial.println("== Hanawa Leuchter boot ==");
 
-  // native APA102 stripe via HSPI (SCK=GPIO14/D5, MOSI=GPIO13/D7)
-  stripe.begin(LED_COUNT);
+  // native APA102 stripe via HSPI (SCK=GPIO14/D5, MOSI=GPIO13/D7).
+  // begin() only allocates the pixel buffer for the longest frame we accept;
+  // every frame states how many LEDs it addresses (see renderFrame).
+  stripe.begin(MAX_LEDS);
   stripe.setBrightness(LED_BRIGHTNESS);   // 0..31
 
-  // Boot-Testcycle: shows if the SPI-Write reaches the stripe
+  // Boot-Testcycle: shows if the SPI-Write reaches the stripe. MAX_LEDS blocks
+  // are sent, a shorter stripe simply ignores the rest.
   Serial.println("LED test cycle: white/red/green/blue/off (1.5s each)");
-  for (int i = 0; i < LED_COUNT; i++) stripe.setPixel(i, 255, 255, 255);
+  for (int i = 0; i < MAX_LEDS; i++) stripe.setPixel(i, 255, 255, 255);
   stripe.show(); delay(1500);
-  for (int i = 0; i < LED_COUNT; i++) stripe.setPixel(i, 255, 0, 0);
+  for (int i = 0; i < MAX_LEDS; i++) stripe.setPixel(i, 255, 0, 0);
   stripe.show(); delay(1500);
-  for (int i = 0; i < LED_COUNT; i++) stripe.setPixel(i, 0, 255, 0);
+  for (int i = 0; i < MAX_LEDS; i++) stripe.setPixel(i, 0, 255, 0);
   stripe.show(); delay(1500);
-  for (int i = 0; i < LED_COUNT; i++) stripe.setPixel(i, 0, 0, 255);
+  for (int i = 0; i < MAX_LEDS; i++) stripe.setPixel(i, 0, 0, 255);
   stripe.show(); delay(1500);
   stripe.clear(); stripe.show();
   Serial.println("test cycle done");
@@ -170,22 +176,21 @@ void loop() {
   IPAddress sender = udp.remoteIP();
   uint16_t sport = udp.remotePort();
 
-  int colors = parseHyperion(rxbuf, got);
+  const uint8_t *rgb = nullptr;
+  int colors = parseHyperion(rxbuf, got, &rgb);
   if (colors == 0) {
     Serial.print("invalid UDP packet (");
     Serial.print(got);
     Serial.println(" bytes), rejected");
   } else {
-    renderFrame(rxbuf + 4, colors);
+    renderFrame(rgb, colors);
     stripe.show();
     ack.beginPacket(sender, sport);
     ack.write(HEALTH_BYTE);
     ack.endPacket();
     Serial.print("frame: ");
     Serial.print(colors);
-    Serial.print(" LEDs (");
-    Serial.print(min(colors, LED_COUNT));
-    Serial.print(" on stripe) -> ack 0x80");
+    Serial.println(" LEDs -> ack 0x80");
   }
 
   delay(1);

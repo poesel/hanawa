@@ -12,6 +12,9 @@ Der **Leuchter** empfängt per-LED colors on the ESP8266 via UDP (Hyperion-Proto
   The stripe's two wires are connected in exactly that arrangement. (Measured with
   `probe_pins/`: originally they sat the other way round, and the stripe's wires
   have since been swapped - the HSPI unit is not re-targetable, see PLAN.md.)
+  The 42 LEDs only describe this stripe; the firmware addresses however many LEDs
+  the received frame carries (up to 150), so a longer or shorter stripe works with
+  the same binary.
 - 5V supply for the ESP, separate PSU for the LEDs, WLAN network with the Sucher.
 
 ## Setup
@@ -26,15 +29,18 @@ cp src/secrets.h.example src/secrets.h   # then edit SSID + password
 Other settings in `src/config.h`:
 
 ```c
-#define LED_COUNT     42            // physical stripe length
-#define MAX_RX_LEDS   150           // longest frame the receiver accepts
+#define MAX_LEDS      150           // capacity: longest frame we accept
 #define UDP_PORT      1900          // Hyperion default
 ```
 
-`LED_COUNT` and `MAX_RX_LEDS` are also passed as build flags in `platformio.ini`
-(`-DLED_COUNT=42`, `-DMAX_RX_LEDS=150`), and those defines win over the
-`#ifndef` fallbacks in `config.h` - change both places together, otherwise the
-receiver truncates the frame and rejects it over a checksum mismatch.
+There is **no LED-count define any more**: the number of LEDs a frame addresses is
+the number of RGB triplets in the datagram, i.e. whatever the sender was configured
+with (`--leds`, Hyperion's `ledCount`). `MAX_LEDS` (also passed as a build flag
+`-DMAX_LEDS=150` in `platformio.ini`, which wins over the `#ifndef` fallback in
+`config.h`) only bounds the receive buffer and the driver's pixel buffer
+(3 bytes per LED). A stripe of any length up to 150 works with the same binary,
+and changing the stripe needs no recompile. If a build flag and `config.h`
+disagree, the build flag wins - change both places together.
 
 ## Building and flashing
 
@@ -105,12 +111,14 @@ See [PLAN.md](PLAN.md). Short version:
 - Sender sends `AA 00 FF <chk> R G B ...` (3 bytes per LED) to port 1900.
 - ESP applies the frame to the stripe, then answers with a one-byte UDP packet `0x80`.
 - Invalid magic/checksum: packet rejected, no `0x80` sent, logged on stdout.
-- The receiver accepts frames of **up to `MAX_RX_LEDS` (150) LEDs**, independent of
-  the physical stripe. The checksum is verified over *every* triplet of the
-  received payload, and only the first `LED_COUNT` (42) triplets are put on the
-  stripe; longer frames are clipped, shorter ones leave the remaining LEDs black.
-  The console prints e.g. `frame: 150 LEDs (42 on stripe) -> ack 0x80`, so a sender
-  that does not know the stripe length still gets a sane answer.
+- The receiver accepts frames of **1..`MAX_LEDS` (150) LEDs** and addresses exactly
+  as many LEDs as the datagram carries triplets - the frame's own length decides,
+  the binary does not know the stripe. The checksum is verified over *every*
+  triplet of the received payload. Blocks beyond the physical stripe are dropped by
+  the stripe's connector; LEDs behind a shorter frame stay black. The console prints
+  e.g. `frame: 150 LEDs -> ack 0x80`.
+- The stripe cannot tell the ESP how long it is (APA102 is a one-way pass-through,
+  no read-back channel), which is why nothing has to know that number.
 
 ## Terminal test program
 
@@ -124,12 +132,11 @@ See [PLAN.md](PLAN.md). Short version:
 ./tools/ledsender.py --host 192.168.0.107 chase 00ff00
 ```
 
-`--leds` takes **1..150** (`MAX_LEDS` in the script). The ESP's receiver accepts
-the same range (`MAX_RX_LEDS`), so `--leds` must stay `<= MAX_RX_LEDS` - above
-that the ESP rejects the datagram and the sender reports `NO health byte`. With
-`--leds` above the physical `LED_COUNT` (42) the extra triplets are still
-checksummed but dropped, i.e. you can drive a Hyperion source that is set up for
-a longer strip without resizing it.
+`--leds` takes **1..150** (`MAX_LEDS` in the script) and defaults to 42, the
+stripe currently mounted. The ESP's receiver accepts the same range, and it does
+not care how long the stripe is: the sender's `--leds` is what decides how many
+LEDs light up. Above 150 the ESP rejects the datagram and the sender reports
+`NO health byte`.
 
 Patterns: `solid`, `rainbow`, `fade`, `chase`, `blink`, `random`, `off`;
 `--loop` / `--frames N` / `--fps F` / `--retries N` (resend a frame if the
@@ -161,10 +168,9 @@ UDP receiver on port 1900 which answers `0x80` and use `--host 127.0.0.1`.
 - "UDP port failed": port 1900 conflict or socket exhaustion on the ESP.
 - Ack times > 50 ms: usually WLAN hiccup, not UDP.
 - ESP prints `invalid UDP packet (N bytes), rejected` and `ledsender.py` reports
-  `NO health byte`: the frame disagrees with the *flashed* binary. Either the
-  `LED_COUNT`/`MAX_RX_LEDS` build flags in `platformio.ini` are stale (see the
-  build-flag gotcha), or `--leds` is above `MAX_RX_LEDS` and the datagram does not
-  fit the receive buffer. Frames longer than the physical stripe are *not* an error.
+  `NO health byte`: the datagram is broken - wrong magic, wrong checksum or more
+  triplets than `MAX_LEDS` allows (see the build-flag gotcha for `MAX_LEDS`).
+  Frames longer or shorter than the physical stripe are *not* an error.
 - Stripe does not change color although acks are fine: the stripe keeps its last
   valid frame across re-flashes, so re-run the boot test cycle (white/red/green/blue)
   and check that the clock wire is really on GPIO14 (D5) and the data wire on

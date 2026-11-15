@@ -14,19 +14,31 @@
 
 /* ---------------- UDP ---------------- */
 #define UDP_PORT      1900              // Hyperion default port
-#ifndef MAX_RX_LEDS
-#define MAX_RX_LEDS   150               // longest received frame: 4 + 3*150 bytes
+
+/* Capacity limit: the longest frame we accept and the longest stripe the
+   driver can address. The number of LEDs that actually gets lit is decided at
+   runtime by the frame itself - see the "LEDs" section below. */
+#ifndef MAX_LEDS
+#define MAX_LEDS      150
 #endif
-#define UDP_BUF_RX    460               // 4 + 3*MAX_RX_LEDS = 454 bytes + headroom
+
+#ifndef UDP_BUF_RX
+#define UDP_BUF_RX    (4 + 3 * MAX_LEDS + 6)  // header + all triplets + headroom
+#endif
 #define UDP_BUF_TX    8
 
 /* ---------------- LEDs ---------------- */
-#ifndef LED_COUNT
-#define LED_COUNT     42                // physical stripe length
-#endif
-#if LED_COUNT > MAX_RX_LEDS
-#error "LED_COUNT must be <= MAX_RX_LEDS"
-#endif
+/* The number of addressed LEDs equals the number of RGB triplets in the
+   received datagram (Hyperion's / the sender's --leds): a frame with 10
+   triplets sends 10 LED blocks and leaves the rest of the stripe black, a
+   frame with 150 triplets sends 150 LED blocks. Blocks beyond the physical
+   stripe are simply dropped by the stripe's connector, so a stripe of any
+   length up to MAX_LEDS works without rebuilding.
+
+   An APA102 stripe is a one-way pass-through (SPI bits in, forwarded bits out)
+   and has no read-back channel, so it cannot tell the ESP how long it is. The
+   length only matters as a capacity for the driver's pixel buffer (3 bytes per
+   LED) and as the receive limit. */
 
 /* Stripe wiring: native APA102 frames over the ESP8266's fixed HSPI unit,
    CLOCK = GPIO14, DATA = GPIO13. The stripe's two wires are connected so that

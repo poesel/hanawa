@@ -18,8 +18,13 @@
 
 class APA102 {
 public:
-    // Initialisiere APA102 mit Anzahl LEDs
-    void begin(int num_leds);
+    // Speicher for up to `capacity` LEDs; the length of the stripe itself
+    // is irrelevant - show() only sends what setNumLeds() says.
+    void begin(int capacity);
+
+    // How many LEDs the next show() addresses (clamped to the capacity).
+    // Set this to the number of RGB triplets of the received frame.
+    void setNumLeds(int num_leds);
 
     // Setze Farbe für eine LED (Index 0-basiert)
     void setPixel(int index, uint8_t r, uint8_t g, uint8_t b);
@@ -33,11 +38,15 @@ public:
     // Schalte alle LEDs aus
     void clear();
 
-    // Hole Anzahl LEDs
+    // Hole Anzahl LEDs (of the last show())
     int getNumLeds() { return _numLeds; }
 
+    // Hole Anzahl LEDs the buffer was allocated for
+    int getCapacity() { return _capacity; }
+
 private:
-    int _numLeds;
+    int _capacity;    // pixels allocated in _pixels
+    int _numLeds;     // LEDs sent by the next show()
     uint8_t _brightness;
     uint8_t* _pixels;  // RGB-Buffer (3 Bytes pro LED)
 

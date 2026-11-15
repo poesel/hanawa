@@ -4,19 +4,20 @@
 // Referenz: https://cpldcpu.wordpress.com/2014/08/27/apa102/
 // (taken from sucher2/leuchter, proven on this stripe)
 
-void APA102::begin(int num_leds) {
-    _numLeds = num_leds;
+void APA102::begin(int capacity) {
+    _capacity = capacity;
+    _numLeds = capacity;  // until setNumLeds() says otherwise
     _brightness = 31;  // Maximum (0-31)
 
     // RGB-Buffer allokieren
-    _pixels = (uint8_t*)malloc(num_leds * 3);
+    _pixels = (uint8_t*)malloc(capacity * 3);
     if (!_pixels) {
         Serial.println("[APA102] ERROR: Memory allocation failed");
         return;
     }
 
     // Buffer initialisieren (schwarz)
-    memset(_pixels, 0, num_leds * 3);
+    memset(_pixels, 0, capacity * 3);
 
     // SPI initialisieren
     // D1 mini: HSPI-Pins des Boards (SCK=GPIO14, MOSI=GPIO13) sind
@@ -26,8 +27,8 @@ void APA102::begin(int num_leds) {
     SPI.setDataMode(SPI_MODE0);
     SPI.setBitOrder(MSBFIRST);
 
-    Serial.print("[APA102] Initialised with ");
-    Serial.print(num_leds);
+    Serial.print("[APA102] buffer for ");
+    Serial.print(capacity);
     Serial.println(" LEDs");
 
     // Alle LEDs out
@@ -35,9 +36,15 @@ void APA102::begin(int num_leds) {
     show();
 }
 
+void APA102::setNumLeds(int num_leds) {
+    if (num_leds < 1) num_leds = 1;
+    if (num_leds > _capacity) num_leds = _capacity;
+    _numLeds = num_leds;
+}
+
 void APA102::setPixel(int index, uint8_t r, uint8_t g, uint8_t b) {
-    if (index < 0 || index >= _numLeds) {
-        return;  // Index outside
+    if (index < 0 || index >= _capacity) {
+        return;  // Index outside the allocated buffer
     }
 
     _pixels[index * 3 + 0] = r;
@@ -64,7 +71,7 @@ void APA102::show() {
 }
 
 void APA102::clear() {
-    memset(_pixels, 0, _numLeds * 3);
+    memset(_pixels, 0, _capacity * 3);
 }
 
 void APA102::sendStartFrame() {

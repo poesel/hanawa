@@ -30,10 +30,16 @@ Binary protocol, identical to the Hyperion "UDP LED" protocol, so the Sucher can
 
 Rules:
 
-- `LED_COUNT = n < 100` is a compile-time define (`config.h`); must match the sender.
+- The number of LEDs addressed is the number of triplets in the received datagram
+  (Hyperion's `ledCount`, our sender's `--leds`) — **not** a compile-time constant.
+  The only limit is `MAX_LEDS = 150` (receive buffer + driver capacity). The spec
+  asked for a compile-time `LED_COUNT < 100`; that constant is gone, see notes.
 - Magic bytes + checksum validated; invalid packets are rejected (no `0x80` sent, logged to stdout).
-- Short/long packets: clamp/truncate to `LED_COUNT`.
-- UDP receive buffer: `256` bytes send / `768` bytes receive (`WiFiUDP` in the ESP8261 core supports this at n < 100).
+- Short packets (fewer triplets than the stripe has) leave the remaining LEDs black;
+  long packets (more than the stripe has) are accepted, the extra blocks are dropped by
+  the stripe's connector. No truncation in the parser, the checksum covers the whole payload.
+- UDP receive buffer: `454 + 6` bytes receive (derived from `MAX_LEDS`), 8 bytes send
+  (`WiFiUDP` in the ESP8266 core).
 - `0x80` is only sent **after** the frame has been applied to the stripe → the Sucher can wait for it as a frame-sync signal.
 
 ## Software
@@ -47,7 +53,7 @@ leuchter/
 ├── README.md             # usage instructions (written during implementation)
 ├── src/
 │   ├── main.cpp          # setup()/loop(): WiFi + UDP receive + LED render + health reply
-│   └── config.h          # WiFi, port, LED_COUNT, brightness, colors
+│   └── config.h          # WiFi, port, MAX_LEDS (capacity), brightness, colors
 ├── tools/
 │   └── ledsender.py      # terminal test program
 └── test/                 # optional: raw dump of the ESP8261 health bytes
@@ -60,8 +66,10 @@ leuchter/
   proven driver in `sucher2/leuchter`: core `SPI.begin()` on the ESP8266 HSPI pads
   GPIO14=SCK / GPIO13=MOSI, native APA102 frames, brightness 0..31) — FastLED was
   dropped because its ESP8266-HSPI path never reached the stripe (see notes below).
-  `LED_COUNT` is **42** (the physical stripe length); the receiver accepts frames
-  of up to **`MAX_RX_LEDS` = 150** LEDs and clips them to the stripe. The stripe's two wires
+  `APA102::begin(capacity)` only allocates the pixel buffer (`MAX_LEDS` = 150 → 450 B);
+  `APA102::setNumLeds(n)` is set per frame to the datagram's triplet count, so `show()`
+  sends exactly n LED blocks. The binary therefore works with any stripe up to 150 LEDs.
+  The stripe's two wires
   are connected so that the clock wire sits on GPIO14 (D5) and the data wire on
   GPIO13 (D7); the HSPI unit is fixed to those pads and cannot be re-targeted.
 - `loop()` is completely UDP-driven: `beginReceive`/`nextPacket` with ring logic, frame render, single `0x80` byte back on the same UDP connection.
@@ -91,7 +99,7 @@ Nothing blocks as install issue — no need to ask about missing software.
 ## Tasks
 
 - [x] 1. Scaffold `leuchter/` (platformio.ini, src, tools)
-- [x] 2. `config.h`: WiFi + `LED_COUNT` + UDP port (default **1900**)
+- [x] 2. `config.h`: WiFi + LED count + UDP port (default **1900**)
 - [x] 3. ESP sketch: WiFi connect, `WiFiUDP` receive loop
 - [x] 4. Hyperion protocol parser (magic + checksum)
 - [x] 5. LED driver: FastLED setup → replaced by ported APA102 class + frame render
@@ -109,10 +117,10 @@ Nothing blocks as install issue — no need to ask about missing software.
       upload (`env:ota -t upload --upload-port 192.168.0.107`) printed
       `OTA start: sketch` / `Result: OK` / `OTA finished, rebooting into new sketch`,
       UDP acks still fine afterwards
-- [x] 13. Receiver accepts frames up to **`MAX_RX_LEDS` = 150** LEDs (`UDP_BUF_RX` 460),
-      checksum over the whole payload, clipped to the physical `LED_COUNT` — flashed
-      over OTA and verified: `--leds 42` and `--leds 150` both ack, console shows
-      `frame: 150 LEDs (42 on stripe) -> ack 0x80`
+- [x] 13. Frame length decides the number of addressed LEDs (no `LED_COUNT` any more):
+      `MAX_LEDS 150` capacity, `UDP_BUF_RX = 4 + 3*MAX_LEDS + 6`, `setNumLeds(colors)`
+      before `show()` — flashed over OTA and verified with `--leds 42/150/10/1`, all
+      frames ack `0x80`
 
 ### Implementation notes / deviations from plan
 
@@ -141,16 +149,20 @@ Nothing blocks as install issue — no need to ask about missing software.
   GPIO13, which lets the hardware HSPI (and the old driver) be used again.
   The bit-bang variant that made the swapped wiring work is kept in git history
   (`src/apa102.cpp` history) and documented in `probe_pins/`.
-- Gotcha: `LED_COUNT` and `MAX_RX_LEDS` are also passed as build flags in `platformio.ini`
-  (`-DLED_COUNT=42`, `-DMAX_RX_LEDS=150`); those defines beat the `#ifndef` fallbacks in
-  `src/config.h`, so both places have to be changed together. A stale
-  `LED_COUNT=40` makes the receiver reject 42-LED frames (truncated checksum).
-- Receive limit is decoupled from the stripe: `MAX_RX_LEDS 150` + `UDP_BUF_RX 460`
-  (`4 + 3*150 = 454` bytes plus headroom) let the receiver accept the frames of a
-  Hyperion setup that is configured for a longer strip. `parseHyperion` checksums the
-  **whole** payload and refuses frames with more than `MAX_RX_LEDS` triplets;
-  `renderFrame` then shows only the first `LED_COUNT`. `ledsender.py`'s own limit
-  (`MAX_LEDS = 150`) matches, so `--leds` never exceeds what the ESP accepts.
+- Gotcha: `MAX_LEDS` is passed as a build flag in `platformio.ini` (`-DMAX_LEDS=150`);
+  that define beats the `#ifndef MAX_LEDS` fallback in `src/config.h`, so a stale
+  command-line flag silently changes the receive/stripe capacity. (The old failure mode
+  of a stale `-DLED_COUNT=40` rejecting 42-LED frames cannot happen any more — there
+  is no `LED_COUNT`.)
+- Stripe length is not a firmware setting at all: `MAX_LEDS 150` is only the capacity
+  (`UDP_BUF_RX = 4 + 3*150 + 6 = 460`, driver pixel buffer 450 B via `malloc`). Each
+  frame states its own length, `parseHyperion` checksums the **whole** payload and
+  refuses frames with more than `MAX_LEDS` triplets, `renderFrame` sets exactly those
+  pixels and calls `setNumLeds(colors)`, so `show()` emits exactly n APA102 LED blocks
+  plus an end frame sized after n. An APA102 stripe is a one-way pass-through and
+  cannot report its own length, which is why nothing needs to know it.
+- `ledsender.py`'s own limit (`MAX_LEDS = 150`) matches, so `--leds` never exceeds
+  what the ESP accepts.
 - OTA: the sketch runs `ArduinoOTA` (version 1.0, bundled in the ESP8266 core, no
   extra `lib_deps`), hostname `hanawa-leuchter`, port 8266, **no password**.
   `platformio.ini` has a second environment `env:ota` with
