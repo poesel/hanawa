@@ -5,12 +5,17 @@
  * applies them to the APA102 LED stripe and sends back the health byte
  * 0x80 after every applied frame (frame-sync for the sender).
  *
- * Hyperion UDP LED protocol (n = LED_COUNT LEDs):
+ * Hyperion UDP LED protocol (n = number of RGB triplets in the datagram,
+ *   up to MAX_RX_LEDS; the sender's --leds must be <= MAX_RX_LEDS):
  *   [0] 0xAA  (magic)
  *   [1] 0x00  (no command) / 0xAB (command byte follows at [4])
  *   [2] 0xFF  (magic)
  *   [3] checksum: low byte of sum(bytes[0..2] + all color bytes)
  *   [4..] R G B per LED (with 0xAB: starting at [5])
+ *
+ * The checksum always covers the whole received payload. Frames longer than
+ * the physical stripe (LED_COUNT) are accepted, their checksum verified over
+ * every triplet, and only the first LED_COUNT triplets are put on the stripe.
  */
 
 #include <ESP8266WiFi.h>
@@ -39,7 +44,7 @@ static int parseHyperion(const uint8_t *buf, int len) {
 
   int colors = (len - off) / 3;
   if (colors <= 0) return 0;
-  if (colors > LED_COUNT) colors = LED_COUNT;  // truncate too-long frames
+  if (colors > MAX_RX_LEDS) return 0;  // longer than the receive buffer allows
 
   uint8_t sum = 0;
   for (int i = 0; i < 3; i++) sum += buf[i];        // header without checksum byte
@@ -52,6 +57,9 @@ static int parseHyperion(const uint8_t *buf, int len) {
 /* -------- FastLED -------- */
 
 static void renderFrame(const uint8_t *rgb, int colors) {
+  // Frames may carry more triplets than the stripe has; only the first
+  // LED_COUNT of them are shown, the rest is dropped (checksum still covered
+  // them in parseHyperion).
   for (int i = 0; i < LED_COUNT; i++) {
     if (i < colors) {
       stripe.setPixel(i, rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
@@ -175,7 +183,9 @@ void loop() {
     ack.endPacket();
     Serial.print("frame: ");
     Serial.print(colors);
-    Serial.println(" LEDs -> ack 0x80");
+    Serial.print(" LEDs (");
+    Serial.print(min(colors, LED_COUNT));
+    Serial.print(" on stripe) -> ack 0x80");
   }
 
   delay(1);

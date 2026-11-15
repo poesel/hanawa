@@ -14,15 +14,18 @@
 
 /* ---------------- UDP ---------------- */
 #define UDP_PORT      1900              // Hyperion default port
-#define UDP_BUF_RX    320               // 4 + 3*99 = 301 bytes + headroom
+#ifndef MAX_RX_LEDS
+#define MAX_RX_LEDS   150               // longest received frame: 4 + 3*150 bytes
+#endif
+#define UDP_BUF_RX    460               // 4 + 3*MAX_RX_LEDS = 454 bytes + headroom
 #define UDP_BUF_TX    8
 
 /* ---------------- LEDs ---------------- */
 #ifndef LED_COUNT
-#define LED_COUNT     42                // physical stripe length (n < 100!)
+#define LED_COUNT     42                // physical stripe length
 #endif
-#if LED_COUNT >= 100
-#error "LED_COUNT must be < 100"
+#if LED_COUNT > MAX_RX_LEDS
+#error "LED_COUNT must be <= MAX_RX_LEDS"
 #endif
 
 /* Stripe wiring: native APA102 frames over the ESP8266's fixed HSPI unit,

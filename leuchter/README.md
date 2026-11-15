@@ -26,14 +26,15 @@ cp src/secrets.h.example src/secrets.h   # then edit SSID + password
 Other settings in `src/config.h`:
 
 ```c
-#define LED_COUNT     42            // n < 100, must match the sender
+#define LED_COUNT     42            // physical stripe length
+#define MAX_RX_LEDS   150           // longest frame the receiver accepts
 #define UDP_PORT      1900          // Hyperion default
 ```
 
-`LED_COUNT` is also passed as a build flag in `platformio.ini`
-(`-DLED_COUNT=42`), and that define wins over `config.h` - change both places
-together, otherwise the receiver truncates the frame and rejects it over a
-checksum mismatch.
+`LED_COUNT` and `MAX_RX_LEDS` are also passed as build flags in `platformio.ini`
+(`-DLED_COUNT=42`, `-DMAX_RX_LEDS=150`), and those defines win over the
+`#ifndef` fallbacks in `config.h` - change both places together, otherwise the
+receiver truncates the frame and rejects it over a checksum mismatch.
 
 ## Building and flashing
 
@@ -104,6 +105,12 @@ See [PLAN.md](PLAN.md). Short version:
 - Sender sends `AA 00 FF <chk> R G B ...` (3 bytes per LED) to port 1900.
 - ESP applies the frame to the stripe, then answers with a one-byte UDP packet `0x80`.
 - Invalid magic/checksum: packet rejected, no `0x80` sent, logged on stdout.
+- The receiver accepts frames of **up to `MAX_RX_LEDS` (150) LEDs**, independent of
+  the physical stripe. The checksum is verified over *every* triplet of the
+  received payload, and only the first `LED_COUNT` (42) triplets are put on the
+  stripe; longer frames are clipped, shorter ones leave the remaining LEDs black.
+  The console prints e.g. `frame: 150 LEDs (42 on stripe) -> ack 0x80`, so a sender
+  that does not know the stripe length still gets a sane answer.
 
 ## Terminal test program
 
@@ -111,10 +118,18 @@ See [PLAN.md](PLAN.md). Short version:
 
 ```bash
 ./tools/ledsender.py --host 192.168.0.107 solid ff0000     # --leds defaults to 42
+./tools/ledsender.py --host 192.168.0.107 --leds 150 solid ff0000   # clipped to the stripe
 ./tools/ledsender.py --host 192.168.0.107 --fps 25 --loop rainbow
 ./tools/ledsender.py --host 192.168.0.107 --leds 42 fade ff0000 0000ff
 ./tools/ledsender.py --host 192.168.0.107 chase 00ff00
 ```
+
+`--leds` takes **1..150** (`MAX_LEDS` in the script). The ESP's receiver accepts
+the same range (`MAX_RX_LEDS`), so `--leds` must stay `<= MAX_RX_LEDS` - above
+that the ESP rejects the datagram and the sender reports `NO health byte`. With
+`--leds` above the physical `LED_COUNT` (42) the extra triplets are still
+checksummed but dropped, i.e. you can drive a Hyperion source that is set up for
+a longer strip without resizing it.
 
 Patterns: `solid`, `rainbow`, `fade`, `chase`, `blink`, `random`, `off`;
 `--loop` / `--frames N` / `--fps F` / `--retries N` (resend a frame if the
@@ -146,8 +161,10 @@ UDP receiver on port 1900 which answers `0x80` and use `--host 127.0.0.1`.
 - "UDP port failed": port 1900 conflict or socket exhaustion on the ESP.
 - Ack times > 50 ms: usually WLAN hiccup, not UDP.
 - ESP prints `invalid UDP packet (N bytes), rejected` and `ledsender.py` reports
-  `NO health byte`: the LED count disagrees - `--leds` must equal the `LED_COUNT`
-  the *flashed* binary was built with (see the `platformio.ini` build-flag gotcha).
+  `NO health byte`: the frame disagrees with the *flashed* binary. Either the
+  `LED_COUNT`/`MAX_RX_LEDS` build flags in `platformio.ini` are stale (see the
+  build-flag gotcha), or `--leds` is above `MAX_RX_LEDS` and the datagram does not
+  fit the receive buffer. Frames longer than the physical stripe are *not* an error.
 - Stripe does not change color although acks are fine: the stripe keeps its last
   valid frame across re-flashes, so re-run the boot test cycle (white/red/green/blue)
   and check that the clock wire is really on GPIO14 (D5) and the data wire on

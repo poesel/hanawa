@@ -60,7 +60,8 @@ leuchter/
   proven driver in `sucher2/leuchter`: core `SPI.begin()` on the ESP8266 HSPI pads
   GPIO14=SCK / GPIO13=MOSI, native APA102 frames, brightness 0..31) — FastLED was
   dropped because its ESP8266-HSPI path never reached the stripe (see notes below).
-  `LED_COUNT` is **42** (the physical stripe length), max 99. The stripe's two wires
+  `LED_COUNT` is **42** (the physical stripe length); the receiver accepts frames
+  of up to **`MAX_RX_LEDS` = 150** LEDs and clips them to the stripe. The stripe's two wires
   are connected so that the clock wire sits on GPIO14 (D5) and the data wire on
   GPIO13 (D7); the HSPI unit is fixed to those pads and cannot be re-targeted.
 - `loop()` is completely UDP-driven: `beginReceive`/`nextPacket` with ring logic, frame render, single `0x80` byte back on the same UDP connection.
@@ -104,6 +105,14 @@ Nothing blocks as install issue — no need to ask about missing software.
 - [x] 11. OTA: ArduinoOTA wired into the sketch + `env:ota` (`upload_protocol = espota`),
       upload plumbing verified; the one-time serial flash that installs the first
       OTA-capable build is still pending (no `/dev/ttyUSB0` connected)
+- [x] 12. OTA round trip done: bootstrap serial flash (`env:d1mini -t upload`) → wireless
+      upload (`env:ota -t upload --upload-port 192.168.0.107`) printed
+      `OTA start: sketch` / `Result: OK` / `OTA finished, rebooting into new sketch`,
+      UDP acks still fine afterwards
+- [x] 13. Receiver accepts frames up to **`MAX_RX_LEDS` = 150** LEDs (`UDP_BUF_RX` 460),
+      checksum over the whole payload, clipped to the physical `LED_COUNT` — flashed
+      over OTA and verified: `--leds 42` and `--leds 150` both ack, console shows
+      `frame: 150 LEDs (42 on stripe) -> ack 0x80`
 
 ### Implementation notes / deviations from plan
 
@@ -132,10 +141,16 @@ Nothing blocks as install issue — no need to ask about missing software.
   GPIO13, which lets the hardware HSPI (and the old driver) be used again.
   The bit-bang variant that made the swapped wiring work is kept in git history
   (`src/apa102.cpp` history) and documented in `probe_pins/`.
-- Gotcha: `LED_COUNT` is also passed as a build flag in `platformio.ini`
-  (`-DLED_COUNT=42`); that define beats the `#ifndef LED_COUNT` fallback in
+- Gotcha: `LED_COUNT` and `MAX_RX_LEDS` are also passed as build flags in `platformio.ini`
+  (`-DLED_COUNT=42`, `-DMAX_RX_LEDS=150`); those defines beat the `#ifndef` fallbacks in
   `src/config.h`, so both places have to be changed together. A stale
   `LED_COUNT=40` makes the receiver reject 42-LED frames (truncated checksum).
+- Receive limit is decoupled from the stripe: `MAX_RX_LEDS 150` + `UDP_BUF_RX 460`
+  (`4 + 3*150 = 454` bytes plus headroom) let the receiver accept the frames of a
+  Hyperion setup that is configured for a longer strip. `parseHyperion` checksums the
+  **whole** payload and refuses frames with more than `MAX_RX_LEDS` triplets;
+  `renderFrame` then shows only the first `LED_COUNT`. `ledsender.py`'s own limit
+  (`MAX_LEDS = 150`) matches, so `--leds` never exceeds what the ESP accepts.
 - OTA: the sketch runs `ArduinoOTA` (version 1.0, bundled in the ESP8266 core, no
   extra `lib_deps`), hostname `hanawa-leuchter`, port 8266, **no password**.
   `platformio.ini` has a second environment `env:ota` with
@@ -143,7 +158,9 @@ Nothing blocks as install issue — no need to ask about missing software.
   --upload-port <ESP-IP>` pushes the built `.bin` over WLAN (espota.py
   announces itself on a random local port and invites the ESP). Verified plumbing;
   the ESP's current firmware has no OTA listener, so the first OTA-capable build
-  still must go over serial (`AVAILABLE: espota, esptool` for this board).
+  still must go over serial (`AVAILABLE: espota, esptool` for this board). Done:
+  that bootstrap serial flash happened, and the following wireless upload
+  succeeded end to end (`Result: OK`, ESP reboots into the new sketch).
   Costs measured on this project: +46 KB flash / +630 B RAM, build 320,388 B
   (30.7 % of flash) - ArduinoOTA writes the new sketch into the free flash behind
   the running one, so `old + new` has to stay below ~1 MB.
