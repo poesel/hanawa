@@ -127,6 +127,14 @@ Nothing blocks as install issue — no need to ask about missing software.
       GPIO14/GPIO13 every 10 s. Uploaded twice (`Result: OK`), second upload also
       proves the test sketch still carries an OTA listener, so the production build
       can be pushed back without a cable
+- [x] 15. Diagnosis settled: 10 white blinks during the GPIO14-clock phase, the swapped
+      (red) phase left the stripe dark → wire orientation is the production assumption
+      (clock = GPIO14/D5, data = GPIO13/D7), no bit-bang driver needed. The fault was
+      the stripe's **power wiring** (its own PSU), which the user then fixed
+- [x] 16. Production firmware restored over OTA (`pio run -d leuchter -e ota -t upload
+      --upload-port 192.168.0.107`, image 324.560 B, `Result: OK`): UDP at :1900 acks
+      `0x80` again with `--leds 108`, 42, 150 and 10 (the first run raced the ESP's
+      reboot and reported `NO health byte`, the runs afterwards all ack in 3-22 ms)
 
 ### Implementation notes / deviations from plan
 
@@ -192,6 +200,9 @@ Nothing blocks as install issue — no need to ask about missing software.
   hardware HSPI any more — the core `SPI` library is locked to GPIO14=SCK/GPIO13=MOSI.
   Either the two stripe wires get exchanged physically, or `src/apa102.cpp` switches
   to the bit-bang variant that is kept in git history (proven working in `probe_pins/`).
+  Did **not** happen: at the final position the white phase (clock = GPIO14) blinked and
+  the swapped phase stayed dark, so the hardware HSPI path stays in use. A totally dark
+  stripe there turned out to be the stripe's power supply, not the two wires in the pads.
 - Python 3.13 venv at repo root (`.venv/`, git-ignored), system pip PEP 668 locked.
 
 ## Open questions (ask before implementation)

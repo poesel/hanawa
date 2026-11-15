@@ -15,8 +15,11 @@ Der **Leuchter** empfängt per-LED colors on the ESP8266 via UDP (Hyperion-Proto
   have since been swapped - the HSPI unit is not re-targetable, see PLAN.md.)
   The 42 LEDs only describe the bench stripe; the firmware addresses however many
   LEDs the received frame carries (up to 150), so a longer or shorter stripe works
-  with the same binary. The wiring at the final position has **not** been re-measured
-  - `wire_test/` is the OTA-only way to check it again.
+  with the same binary. The wiring was re-checked at the final position with
+  `wire_test/`: its white phase (clock = GPIO14) blinked the first 10 LEDs, its
+  red phase (clock = GPIO13) left the stripe dark → the same clock=GPIO14 / data=GPIO13
+  arrangement as on the bench. The fault there was the stripe's **power supply**,
+  not its wiring.
 - 5V supply for the ESP, separate PSU for the LEDs, WLAN network with the Sucher.
 
 ## Setup
@@ -109,7 +112,7 @@ Two throw-away sub-projects sit next to the sketch; each has its own
 |---|---|
 | `test_apa102/` | SPI + APA102 only (no WiFi, no UDP): endless `white → red → off → green → blue → off` cycle, 2 Hz. Proves whether the stripe reacts to the ESP's SPI writes at all. |
 | `probe_pins/` | Bit-bangs a native APA102 frame to **every** GPIO pair the D1 mini exposes and shows a different (colour, number of lit LEDs) per pair, printed to stdout as well. Used to find out on which physical pads the stripe really sits (the D1 mini v2 generation does not necessarily keep the GPIO numbering of the older boards). |
-| `wire_test/` | OTA-only (the ESP has no serial at its final place): bit-bangs the first 10 LEDs of the 108-LED stripe white/off, and swaps the clock/data roles of GPIO14 and GPIO13 every 10 s. White blink non-stop = wiring as the production sketch assumes, red blink non-stop = the two stripe wires are swapped, nothing at all = not a wiring problem (check the strip's PSU / the first solder joint). Keeps `ArduinoOTA`, so the production build can be pushed back over the air. |
+| `wire_test/` | OTA-only (the ESP has no serial at its final place): bit-bangs the first 10 LEDs of the 108-LED stripe white/off, and swaps the clock/data roles of GPIO14 and GPIO13 every 10 s. White blink non-stop = wiring as the production sketch assumes, red blink non-stop = the two stripe wires are swapped, nothing at all = not a wiring problem (check the strip's PSU / the first solder joint). Keeps `ArduinoOTA`, so the production build can be pushed back over the air. Measured at the final position: 10 white blinks during the GPIO14-clock phase, the swapped (red) phase left the stripe dark → the clock wire really sits on GPIO14, and the fault was the stripe's own power supply. |
 
 The stripe keeps its last valid frame over a re-flash, so an "always on"
 stripe does not prove that the current firmware writes to it.
@@ -185,6 +188,15 @@ UDP receiver on port 1900 which answers `0x80` and use `--host 127.0.0.1`.
   valid frame across re-flashes, so re-run the boot test cycle (white/red/green/blue)
   and check that the clock wire is really on GPIO14 (D5) and the data wire on
   GPIO13 (D7).
+- Stripe completely dark at the final position: run `wire_test/` (OTA-only, see the
+  helper-sketch table). At this project the result was the white phase blinking and
+  the swapped phase doing nothing, i.e. the SPI wiring was fine and the fault was the
+  stripe's **PSU** - the 5V supply for the LEDs had to be fixed, not the two wires in
+  the ESP's pads. Once the stripe works, push the production build back over the air:
+
+  ```bash
+  .venv/bin/pio run -d leuchter -e ota -t upload --upload-port 192.168.0.107
+  ```
 - Watching the ESP's console: `tools/serialwatch.py` (needs pyserial from the
   repo's `.venv` plus the `dialout` group):
 
