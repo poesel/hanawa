@@ -158,6 +158,37 @@ the hex dump without UDP. UDP is fire-and-forget, so occasional datagram loss
 happens - retries make the frame rate reliable.
 For each frame it prints the round-trip time of the `0x80` health byte.
 
+Two things the tool does on its own:
+
+- **Full sweep**: a pattern is never stopped halfway, so every LED gets lit once.
+  `chase` moves a 4-LED head along the stripe, therefore `--frames` is raised
+  automatically and says so:
+  `chase: 10 leds -> full sweep needs 14 frames (--frames raised from 3 to 14)`.
+  `blink` gets at least 2 frames (one lit, one black). In `--loop` mode the
+  first round prints `full sweep done (N frames, every led was on once)`.
+- **Stop key**: a running pattern is stopped by pressing the **space bar** - no
+  Enter needed, and the animation keeps running while no key is pressed
+  (`Ctrl+C`/`Ctrl+Q` work as well). This needs a real terminal; with a piped
+  stdin the tool prints `(stdin is not a terminal: space-bar stop disabled)`.
+
+Every exit is clean: `quit` in the menu, Ctrl+C, SIGTERM and the space bar all
+print a summary instead of a traceback, and the terminal settings are restored,
+so the menu keeps working after a pattern was stopped:
+
+```
+--- run summary (stopped by the space bar)
+frames: 18 sent, 18 got 0x80, 0 had no health byte
+latency: 4.8 ms avg, 11 ms max
+packet log: ledsender.log
+```
+
+The **exit code** is `0` when every frame got its `0x80`, `1` when some had no
+health byte - handy for shell checks:
+
+```bash
+./tools/ledsender.py --host 192.168.0.107 --leds 10 --frames 3 chase ff0000 || echo "stripe missed frames"
+```
+
 Without `pattern` argument the program opens an **interactive menu** where
 you can type the patterns directly plus settings and logging:
 
@@ -175,6 +206,10 @@ change, `--log -` to disable).
 
 Without an ESP8266 at hand you can test the whole protocol on PC: start a
 UDP receiver on port 1900 which answers `0x80` and use `--host 127.0.0.1`.
+That also covers the new behaviour - the sweep note, the summary and the exit
+code. The **space bar needs a real terminal**, so it only works when you run
+the tool in a terminal yourself, not behind `ssh host "ledsender.py ..."` or a
+pipe.
 
 ## Troubleshooting
 

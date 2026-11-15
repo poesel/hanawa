@@ -15,12 +15,27 @@ Only Python stdlib. Examples:
     ./ledsender.py --host 192.168.1.101            <- interactive menu
 
 Run with --dry to see the frames without UDP.
+
+Notes:
+
+- chase (and every other pattern) is sent long enough that every LED has
+  been on at least once - see sweep_frames().
+- --loop / "loop" in the menu can be stopped by pressing the space bar
+  (no Enter needed); on a real terminal the animation keeps running while
+  no key is pressed.
+- Ctrl+C, SIGTERM and "quit" exit properly: summary of the run, no
+  traceback, exit code 0 when every frame got its 0x80 (else 1).
 """
 
 import argparse
+import os
 import random
+import select
+import signal
 import socket
+import sys
 import time
+import tty
 import colorsys
 from datetime import datetime
 
@@ -76,6 +91,74 @@ def make_colors(name, args, n, step):
     if name == "random":
         return [(random.randrange(256), random.randrange(256), random.randrange(256)) for _ in range(n)]
     raise SystemExit(f"unknown pattern {name}")
+
+
+def sweep_frames(name, n):
+    """Frames a pattern needs so that every LED has been on at least once."""
+    if name == "chase":
+        return n + 4  # the 4-LED head visits every position, then runs off the end
+    if name == "blink":
+        return 2      # one lit frame, one black frame
+    return 1
+
+
+class StopKey:
+    """Non-blocking "the space bar stops the run" watcher.
+
+    The terminal is put into raw mode so a key is readable the moment it is
+    typed (no Enter needed); select() tells without blocking whether a byte is
+    already there, so the animation never waits for input. Only possible on a
+    real terminal - with a piped stdin there is no line discipline to switch
+    off, which is reported once by note()."""
+
+    def __init__(self):
+        self.fd = sys.stdin.fileno() if sys.stdin.isatty() else None
+        self.old = None
+        self.hit = False
+        self.key = "space bar"
+
+    def start(self):
+        self.hit = False  # a new run starts with a fresh key state
+        if self.fd is None or self.old is not None:
+            return
+        self.old = tty.setraw(self.fd)  # returns the settings to restore later
+
+    def poll(self):
+        """True once a stop key (space, Ctrl+C, Ctrl+Q) was seen."""
+        if self.hit:
+            return True
+        if self.fd is None:
+            return False
+        try:
+            if not select.select([self.fd], [], [], 0)[0]:
+                return False
+            ch = os.read(self.fd, 1)
+        except OSError:  # EOF / no usable stdin any more
+            self.fd = None
+            return False
+        names = {b" ": "space bar", b"\x03": "Ctrl+C", b"\x11": "Ctrl+Q"}
+        if ch in names:
+            self.hit = True
+            self.key = names[ch]
+        return self.hit
+
+    def restore(self):
+        """Give the terminal back (echo, line buffering, Ctrl+C again)."""
+        if self.old is None:
+            return
+        try:
+            tty.tcsetattr(self.fd, tty.TCSAFLUSH, self.old)
+        except (OSError, TypeError):
+            pass
+        self.old = None
+
+    def note(self):
+        if self.fd is None:
+            print("(stdin is not a terminal: space-bar stop disabled)")
+
+
+class StopRun(Exception):
+    """Raised when Ctrl+C / SIGTERM asks us to leave - exits with a summary."""
 
 
 class PktLog:
@@ -140,14 +223,22 @@ class Sender:
             s.close()
 
 
-def run_pattern(name, args, st, log):
-    """Send frames of one pattern; returns after st.frames (or forever if loop)."""
+def run_pattern(name, args, st, log, key):
+    """Send frames of one pattern; returns after st.frames (or forever if loop).
+
+    Returns True when the run ended because the space bar was pressed."""
     need = {"solid": 1, "chase": 1, "blink": 1, "fade": 2}.get(name, 0)
     if name in ("solid", "chase", "fade"):  # blink may omit its color
         if len(args) < need:
             print(f"usage: {name} <colors as rrggbb> (need {need}, got {len(args)})")
-            return
+            return False
+    # never stop in the middle of a sweep: chase must light every LED once
+    frames = max(st["frames"], sweep_frames(name, st["leds"]))
+    if frames > st["frames"]:
+        print(f"{name}: {st['leds']} leds -> full sweep needs {frames} frames "
+              f"(--frames raised from {st['frames']} to {frames})")
     step = 0
+    key.start()
     while True:
         leds = make_colors(name, args, st["leds"], step)
         frame = build_frame(leds)
@@ -161,10 +252,26 @@ def run_pattern(name, args, st, log):
                 print(f"frame {step}: NO health byte!")
             else:
                 print(f"frame {step}: ok, ack 0x80 in {ack:.0f}ms")
+        st["sent"] += 1
+        if ack is None:
+            st["missed"] += 1
+        else:
+            st["acked"] += 1
+            st["lat_sum"] += ack
+            st["lat_max"] = max(st["lat_max"], ack)
+        if key.poll():
+            print(f"({key.key} - stopping)")
+            key.restore()
+            return True
         time.sleep(1.0 / st["fps"])
         step += 1
-        if not st["loop"] and step >= st["frames"]:
-            return
+        if st["loop"]:
+            if step == frames:
+                print(f"full sweep done ({frames} frames, every led was on once)")
+            continue
+        if step >= frames:
+            key.restore()
+            return False
 
 
 def make_sender(st, log):
@@ -184,10 +291,14 @@ Settings: fps <f> | leds <n 1..{MAX_LEDS}> | host <ip> | port <p> |
           retries <n>        (resend frame if no ack, default 2)
 Other:    log      (show last 20 log lines) | help | quit
 Example:  chase ff0000
+
+A running pattern is stopped by the space bar (no Enter needed). chase
+always runs long enough that every LED has been on once. quit / Ctrl+C
+exit properly and print the run's summary.
 ---------------------------------------------------------------"""
 
 
-def menu(st, log):
+def menu(st, log, key):
     print(MENU)
     while True:
         try:
@@ -211,7 +322,8 @@ def menu(st, log):
                 print("(no log yet)")
         elif cmd == "loop":
             st["loop"] = not st["loop"]
-            print(f"loop: {'on' if st['loop'] else 'off'}")
+            print(f"loop: {'on' if st['loop'] else 'off'}"
+                  f"{' - press the space bar to stop it' if st['loop'] else ''}")
         elif cmd in ("fps", "leds", "frames"):
             try:
                 st[cmd] = float(parts[1]) if cmd == "fps" else int(parts[1])
@@ -245,9 +357,24 @@ def menu(st, log):
             except (IndexError, ValueError):
                 print("usage: retries <number>")
         elif cmd in PATTERNS:
-            run_pattern(cmd, parts[1:], st, log)
+            if run_pattern(cmd, parts[1:], st, log, key):
+                print(f"(the {key.key} stopped this pattern)")
         else:
             print(f"unknown command: {cmd} (type help)")
+
+
+def summary(st, log, why=""):
+    """Proper exit: stats of the whole run, no traceback."""
+    print(("--- run summary " + why).rstrip())
+    print(f"frames: {st['sent']} sent, {st['acked']} got 0x80, "
+          f"{st['missed']} had no health byte")
+    if st["acked"]:
+        print(f"latency: {st['lat_sum'] / st['acked']:.1f} ms avg, "
+              f"{st['lat_max']:.0f} ms max")
+    if log.path:
+        print(f"packet log: {log.path}")
+    else:
+        print("packet log: disabled (--log -)")
 
 
 def main():
@@ -256,8 +383,9 @@ def main():
     ap.add_argument("--port", type=int, default=1900)
     ap.add_argument("--leds", type=int, default=42)
     ap.add_argument("--fps", type=float, default=10.0)
-    ap.add_argument("--loop", action="store_true", help="run forever")
-    ap.add_argument("--frames", type=int, default=20, help="frames per run (default 20)")
+    ap.add_argument("--loop", action="store_true", help="run forever (space bar stops it)")
+    ap.add_argument("--frames", type=int, default=20,
+                    help="frames per run (default 20; chase is stretched to a full sweep)")
     ap.add_argument("--dry", action="store_true", help="no UDP, print hex dump")
     ap.add_argument("--log", dest="logfile", default="ledsender.log",
                     help="packet log file (default ./ledsender.log, '-' = no logging)")
@@ -274,21 +402,44 @@ def main():
 
     st = {"host": a.host or "127.0.0.1", "port": a.port, "leds": a.leds,
           "fps": a.fps, "loop": a.loop, "frames": a.frames, "dry": a.dry,
-          "retries": max(0, a.retries), "sender": None}
+          "retries": max(0, a.retries), "sender": None,
+          "sent": 0, "acked": 0, "missed": 0, "lat_sum": 0.0, "lat_max": 0.0}
     if not a.dry:
         st["sender"] = make_sender(st, log)
 
-    if a.pattern:
-        if not a.host and not a.dry:
-            print(f"WARNING: no --host given, sending to {st['host']}:{a.port} "
-                  f"(probably wrong - add --host <ESP-IP>)")
-        print(f"pattern={a.pattern} host={st['host']}:{a.port} leds={a.leds} "
-              f"fps={a.fps} retries={a.retries} log={a.logfile}")
-        run_pattern(a.pattern, a.colors, st, log)
-    else:
-        if not a.host:
-            print("note: no --host given, menu starts with host=127.0.0.1")
-        menu(st, log)
+    key = StopKey()
+    key.note()
+
+    def stop_run(signum, _frame):
+        """Ctrl+C / SIGTERM from outside still exit properly."""
+        raise StopRun(f"signal {signum}")
+
+    signal.signal(signal.SIGINT, stop_run)
+    signal.signal(signal.SIGTERM, stop_run)
+
+    why = ""
+    try:
+        if a.pattern:
+            if not a.host and not a.dry:
+                print(f"WARNING: no --host given, sending to {st['host']}:{a.port} "
+                      f"(probably wrong - add --host <ESP-IP>)")
+            print(f"pattern={a.pattern} host={st['host']}:{a.port} leds={a.leds} "
+                  f"fps={a.fps} retries={a.retries} log={a.logfile}")
+            if run_pattern(a.pattern, a.colors, st, log, key):
+                why = ("(stopped by the space bar)" if key.key == "space bar"
+                       else f"({key.key} - stopping)")
+        else:
+            if not a.host:
+                print("note: no --host given, menu starts with host=127.0.0.1")
+            menu(st, log, key)
+            why = "(menu quit)"
+    except (KeyboardInterrupt, StopRun) as exc:
+        why = f"(interrupted: {exc})" if str(exc) else "(interrupted: Ctrl+C)"
+
+    key.restore()
+    summary(st, log, why)
+    # exit code: 0 when every frame got its 0x80, 1 when the strip missed some
+    sys.exit(0 if st["missed"] == 0 else 1)
 
 
 if __name__ == "__main__":

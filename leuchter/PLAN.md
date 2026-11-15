@@ -84,6 +84,13 @@ Terminal program: build Hyperion UDP frames, send them to the ESP via `socket`, 
 - Patterns: `solid <#rrggbb>`, `rainbow`, `fade <#a> <#b>`, `chase <#c>`, `blink`, `random`, `off`
 - `--loop` / `--fps <n>` for continuous playback
 - Reports round-trip latency from the `0x80` health byte (nice for debugging)
+- `--leds 1..150`: the number of RGB triplets in the datagram decides how many LEDs
+  light up, nothing has to know the stripe length
+- Full sweep: patterns are sent long enough that every LED has been lit once
+  (`chase` = `leds + 4` frames, printed with a note when `--frames` is raised)
+- The space bar stops a running pattern (no Enter needed, animation keeps running
+  while no key is pressed); Ctrl+C / SIGTERM / `quit` exit with a summary
+  (frames sent/acked/missed, latency, log path) and exit code 0/1
 
 ## Toolchain
 
@@ -135,6 +142,13 @@ Nothing blocks as install issue — no need to ask about missing software.
       --upload-port 192.168.0.107`, image 324.560 B, `Result: OK`): UDP at :1900 acks
       `0x80` again with `--leds 108`, 42, 150 and 10 (the first run raced the ESP's
       reboot and reported `NO health byte`, the runs afterwards all ack in 3-22 ms)
+- [x] 17. `ledsender.py` improved: `chase` always runs until every LED has been on once
+      (frames raised automatically, with a note), `--loop` / menu patterns are stopped
+      by the **space bar** (raw-mode stdin + `select()`, no Enter, animation keeps
+      running while nothing is typed), and every exit is proper: `quit`, Ctrl+C, SIGTERM
+      and the space bar print a run summary (frames sent / acked / missed, avg/max
+      latency, log path) instead of a traceback, the terminal is restored so the menu
+      keeps working, and the exit code is `0` if every frame got its `0x80`, else `1`
 
 ### Implementation notes / deviations from plan
 
@@ -204,6 +218,14 @@ Nothing blocks as install issue — no need to ask about missing software.
   the swapped phase stayed dark, so the hardware HSPI path stays in use. A totally dark
   stripe there turned out to be the stripe's power supply, not the two wires in the pads.
 - Python 3.13 venv at repo root (`.venv/`, git-ignored), system pip PEP 668 locked.
+- `ledsender.py`'s stop key: `tty.setraw(sys.stdin.fileno())` returns the old settings
+  (it is the only stdlib call that hands them back), `select.select([fd], [], [], 0)`
+  tests without blocking whether a byte is already there - note that the timeout is the
+  **4th** argument, passing `0` as the 3rd raises `TypeError: arguments 1-3 must be
+  sequences`. `os.read(fd, 1)` then delivers that one byte immediately (raw mode already
+  returns per char, VMIN/VTIME are not needed). Only works on a real tty: with a piped
+  stdin there is no line discipline, so the tool says the space bar is disabled instead
+  of blocking forever on `input()`.
 
 ## Open questions (ask before implementation)
 
