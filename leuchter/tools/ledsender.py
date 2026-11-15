@@ -29,6 +29,8 @@ MAGIC_B = 0xFF
 NO_COMMAND = 0x00
 HEALTH_BYTE = b"\x80"
 
+MAX_LEDS = 150   # longest frame this sender can build (3 bytes per LED)
+
 PATTERNS = ("solid", "rainbow", "fade", "chase", "blink", "random", "off")
 
 
@@ -173,11 +175,11 @@ def make_sender(st, log):
                   retry_delay=max(0.02, min(0.2, interval / 2)))
 
 
-MENU = """
+MENU = f"""
 --- Leuchter menu ---------------------------------------------
 Patterns: solid <c> | rainbow | fade <a> <b> | chase <c> |
           blink <c> | random | off          (colors as rrggbb)
-Settings: fps <f> | leds <n 1..99> | host <ip> | port <p> |
+Settings: fps <f> | leds <n 1..{MAX_LEDS}> | host <ip> | port <p> |
           frames <n> | loop            (loop = send forever)
           retries <n>        (resend frame if no ack, default 2)
 Other:    log      (show last 20 log lines) | help | quit
@@ -215,8 +217,8 @@ def menu(st, log):
                 st[cmd] = float(parts[1]) if cmd == "fps" else int(parts[1])
                 if cmd == "fps" and st["fps"] <= 0:
                     raise SystemExit("fps must be > 0")
-                if cmd == "leds" and not 1 <= st["leds"] < 100:
-                    raise SystemExit("leds must be 1..99")
+                if cmd == "leds" and not 1 <= st["leds"] <= MAX_LEDS:
+                    raise SystemExit(f"leds must be 1..{MAX_LEDS}")
                 if cmd == "fps" and st["sender"] is not None:
                     st["sender"] = make_sender(st, log)  # keeps retry delay in sync
                 print(f"{cmd} = {st[cmd]}")
@@ -265,8 +267,8 @@ def main():
     ap.add_argument("colors", nargs="*", help="colors as rrggbb")
     a = ap.parse_args()
 
-    if not 1 <= a.leds < 100:
-        raise SystemExit("--leds must be 1..99")
+    if not 1 <= a.leds <= MAX_LEDS:
+        raise SystemExit(f"--leds must be 1..{MAX_LEDS}")
 
     log = PktLog(None if a.logfile == "-" else a.logfile)
 
