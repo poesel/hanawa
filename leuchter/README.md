@@ -4,7 +4,8 @@ Der **Leuchter** empfängt per-LED colors on the ESP8266 via UDP (Hyperion-Proto
 
 ## Hardware
 
-- ESP8266 (**Wemos D1 mini v2.1.0**) with an **APA102 LED stripe** (42 LEDs), driven
+- ESP8266 (**Wemos D1 mini v2.1.0**) with an **APA102 LED stripe** (42 LEDs on the
+  workbench, 108 LEDs of several soldered-together segments at the final position), driven
   over the ESP's built-in **SPI/HSPI unit**, which is fixed to two pads:
   - clock wire → `GPIO14` (pad **D5**)
   - data wire → `GPIO13` (pad **D7**)
@@ -12,9 +13,10 @@ Der **Leuchter** empfängt per-LED colors on the ESP8266 via UDP (Hyperion-Proto
   The stripe's two wires are connected in exactly that arrangement. (Measured with
   `probe_pins/`: originally they sat the other way round, and the stripe's wires
   have since been swapped - the HSPI unit is not re-targetable, see PLAN.md.)
-  The 42 LEDs only describe this stripe; the firmware addresses however many LEDs
-  the received frame carries (up to 150), so a longer or shorter stripe works with
-  the same binary.
+  The 42 LEDs only describe the bench stripe; the firmware addresses however many
+  LEDs the received frame carries (up to 150), so a longer or shorter stripe works
+  with the same binary. The wiring at the final position has **not** been re-measured
+  - `wire_test/` is the OTA-only way to check it again.
 - 5V supply for the ESP, separate PSU for the LEDs, WLAN network with the Sucher.
 
 ## Setup
@@ -84,6 +86,13 @@ Caveats:
 
 - The build that is currently on the ESP has no `ArduinoOTA`, so it cannot be
   replaced over the network - the chicken-and-egg first upload must be serial.
+  Once an OTA-capable build is running, everything (including the helper sketches
+  below, which carry `upload_protocol = espota` in their own `platformio.ini`) can
+  go wireless:
+
+  ```bash
+  .venv/bin/pio run -d leuchter/wire_test -e ota -t upload --upload-port 192.168.0.107
+  ```
 - No `setPassword()`/`setPasswordHash()` is used, so any device on the LAN that
   knows the hostname `hanawa-leuchter` can flash it.
 - ArduinoOTA writes the new sketch into the free flash **behind** the running
@@ -100,6 +109,7 @@ Two throw-away sub-projects sit next to the sketch; each has its own
 |---|---|
 | `test_apa102/` | SPI + APA102 only (no WiFi, no UDP): endless `white → red → off → green → blue → off` cycle, 2 Hz. Proves whether the stripe reacts to the ESP's SPI writes at all. |
 | `probe_pins/` | Bit-bangs a native APA102 frame to **every** GPIO pair the D1 mini exposes and shows a different (colour, number of lit LEDs) per pair, printed to stdout as well. Used to find out on which physical pads the stripe really sits (the D1 mini v2 generation does not necessarily keep the GPIO numbering of the older boards). |
+| `wire_test/` | OTA-only (the ESP has no serial at its final place): bit-bangs the first 10 LEDs of the 108-LED stripe white/off, and swaps the clock/data roles of GPIO14 and GPIO13 every 10 s. White blink non-stop = wiring as the production sketch assumes, red blink non-stop = the two stripe wires are swapped, nothing at all = not a wiring problem (check the strip's PSU / the first solder joint). Keeps `ArduinoOTA`, so the production build can be pushed back over the air. |
 
 The stripe keeps its last valid frame over a re-flash, so an "always on"
 stripe does not prove that the current firmware writes to it.

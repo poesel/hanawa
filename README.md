@@ -17,7 +17,7 @@ Das Projekt besteht aus zwei Teilen:
 
 ### Leuchter (ESP8266)
 - ESP8266 Development Board (Wemos D1 mini v2.1.0)
-- APA102 LED-Streifen (42 LEDs)
+- APA102 LED-Streifen (42 LEDs during development, 108 LEDs at the final position)
 - 5V Stromversorgung für LEDs
 - WLAN-Verbindung
 
@@ -128,7 +128,7 @@ Sucher und Leuchter kommunizieren per WLAN miteinander.
 
 ## Leuchter
 
-Der Leuchter besteht aus einem ESP8266 (Wemos D1 mini v2.1.0) der eine LED Lichterkette ansteuert. Die LEDs sind vom Typ APA102 (42 LEDs).
+Der Leuchter besteht aus einem ESP8266 (Wemos D1 mini v2.1.0) der eine LED Lichterkette ansteuert. Die LEDs sind vom Typ APA102 (42 LEDs during development, 108 LEDs at the final position).
 
 Die LEDS werden hinter dem Fernseher am Rand angebracht. Die Zählung der LEDs beginnt in der linken, oberen Ecke und verläuft im Uhrzeigersinn. +
 Es wird definiert, wieviele LEDs horizontal und vertikal vorhanden sind.

@@ -121,6 +121,12 @@ Nothing blocks as install issue — no need to ask about missing software.
       `MAX_LEDS 150` capacity, `UDP_BUF_RX = 4 + 3*MAX_LEDS + 6`, `setNumLeds(colors)`
       before `show()` — flashed over OTA and verified with `--leds 42/150/10/1`, all
       frames ack `0x80`
+- [x] 14. Stripe at the final place (108 LEDs, several soldered segments) shows
+      nothing → `wire_test/` helper sketch pushed over OTA only (no serial there):
+      bit-bangs the first 10 LEDs white/off and swaps the clock/data roles of
+      GPIO14/GPIO13 every 10 s. Uploaded twice (`Result: OK`), second upload also
+      proves the test sketch still carries an OTA listener, so the production build
+      can be pushed back without a cable
 
 ### Implementation notes / deviations from plan
 
@@ -176,6 +182,16 @@ Nothing blocks as install issue — no need to ask about missing software.
   Costs measured on this project: +46 KB flash / +630 B RAM, build 320,388 B
   (30.7 % of flash) - ArduinoOTA writes the new sketch into the free flash behind
   the running one, so `old + new` has to stay below ~1 MB.
+- At the final position the ESP has no serial connection any more, so every upload —
+  sketch or helper sketch — has to go over ArduinoOTA. Consequence: **every** sketch
+  that gets flashed must keep `ArduinoOTA.begin()` + `handle()`, otherwise it can never
+  be replaced again without a cable (the reason `wire_test/` carries OTA as well).
+  Helper `platformio.ini`s now use `upload_protocol = espota` and are flashed with
+  `pio run -d leuchter/<dir> -e ota -t upload --upload-port <ESP-IP>`.
+- If `wire_test/` shows the red (swapped) blink, the production build cannot use the
+  hardware HSPI any more — the core `SPI` library is locked to GPIO14=SCK/GPIO13=MOSI.
+  Either the two stripe wires get exchanged physically, or `src/apa102.cpp` switches
+  to the bit-bang variant that is kept in git history (proven working in `probe_pins/`).
 - Python 3.13 venv at repo root (`.venv/`, git-ignored), system pip PEP 668 locked.
 
 ## Open questions (ask before implementation)

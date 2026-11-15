@@ -213,3 +213,6 @@ __marimo__/
 
 # Hanawa Leuchter: WLAN credentials must never be committed
 leuchter/src/secrets.h
+
+# Hanawa Leuchter: WLAN credentials must never be committed (any sub-project)
+secrets.h
