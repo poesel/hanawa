@@ -153,6 +153,25 @@ Die Antwort enthält RGB-Werte (0-255) für jedes Fenster sowie die Rechteck-Koo
 | WLAN verbindet nicht | SSID/Passwort korrekt? 2,4 GHz? Abstand zum Router |
 | Kamerabild schwarz | Richtige Kamera-FPC eingesteckt? Lichtverhältnisse |
 
+## 8.1 OTA (Over-The-Air updates)
+
+The sketch carries `ArduinoOTA` (hostname `hanawa-sucher`, port 8266 in
+`config.h`), so after **one last serial flash** new builds can be pushed
+over WLAN - no cable needed (same scheme as the Leuchter):
+
+```bash
+# once over serial (installs the first OTA-capable build)
+pio run -d sucher2/sucher -e esp32cam -t upload
+# afterwards: wireless, <ESP-IP> is printed on the console at boot
+pio run -d sucher2/sucher -e ota -t upload --upload-port <ESP-IP>
+```
+
+- ArduinoOTA sits on its own port 8266, so it does not clash with the
+  UDP sender to the Leuchter at `:1900`.
+- No `setPassword()` is used: any device on the LAN that knows the
+  hostname `hanawa-sucher` can flash it.
+- A failed upload leaves the old sketch running, the ESP is not bricked.
+
 ## 9. Lizenz
 Dieses Projekt steht unter der MIT-Lizenz. Siehe `LICENSE` für Details.
 

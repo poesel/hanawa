@@ -4,7 +4,7 @@
 #include <cmath>
 #include "esp_camera.h"
 #include "img_converters.h"
-#include "espnow_sender.h"
+#include "udp_sender.h"
 
 // ============================================================================
 // GLOBALER STATE FÜR KONTINUIERLICHE AMBILIGHT-BERECHNUNG
@@ -645,8 +645,8 @@ void calculateAmbilightContinuous() {
     g_ambilightResult.timestamp = millis();
     g_ambilightResult.isValid = true;
     
-    // ESP-NOW: Sende Ambilight-Daten an Leuchter
-    espnow_send_ambilight(g_ambilightResult, g_ambilightConfig.hSeg, g_ambilightConfig.vSeg);
+    // UDP (Hyperion-Protokol): Sende Ambilight-Daten to the Leuchter
+    udp_send_ambilight(g_ambilightResult);
     
     // Aufräumen
     free(rgb_buf);

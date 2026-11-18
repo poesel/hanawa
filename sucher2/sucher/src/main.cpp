@@ -2,10 +2,11 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ArduinoJson.h>
+#include <ArduinoOTA.h>
 #include "config.h"
 #include "index_html.h"
 #include "windows.h"
-#include "espnow_sender.h"
+#include "udp_sender.h"
 
 // Kamera-Pinbelegung für AI-Thinker ESP32-CAM
 // Quelle: https://github.com/espressif/arduino-esp32/blob/master/libraries/ESP32/examples/Camera/CameraWebServer/CameraWebServer.ino
@@ -211,8 +212,9 @@ void setup()
     }
     Serial.println("\nWLAN verbunden. IP: " + WiFi.localIP().toString());
     
-    // ESP-NOW initialisieren (für Ambilight-Daten-Übertragung)
-    espnow_sender_init();
+    // UDP-Sender initialisieren (Hyperion-Protokol, Daten-Übertragung to the
+    // Leuchter at LEUCHTER_IP:UDP_PORT, see udp_sender.h / leuchter/PLAN.md)
+    udp_sender_init();
 
     // Globaler Request-Logger für ALLE Requests
     server.onNotFound([]() {
@@ -245,6 +247,27 @@ void setup()
     });
     server.begin();
     
+    // OTA: new versions of this sketch are pushed over WLAN (like on the
+    // Leuchter). The first OTA-capable build still has to be flashed
+    // over serial - after that: pio run -d sucher2/sucher -e ota -t upload
+    // --upload-port <this ESP's IP>. ArduinoOTA listens on its own port,
+    // so it does not clash with the UDP sender at :1900.
+    ArduinoOTA.setHostname(OTA_HOSTNAME);
+    ArduinoOTA.setPort(OTA_PORT);
+    ArduinoOTA.onStart([]() {
+        Serial.println("OTA start: receiving sketch over WLAN");
+    });
+    ArduinoOTA.onEnd([]() {
+        Serial.println("OTA finished, rebooting into new sketch");
+    });
+    ArduinoOTA.onError([](ota_error_t err) {
+        Serial.print("OTA error ");
+        Serial.println((int)err);
+    });
+    ArduinoOTA.begin();
+    Serial.print("OTA ready, upload to this ESP at :");
+    Serial.println(OTA_PORT);
+    
     Serial.print("HTTP-Server gestartet. Free heap: ");
     Serial.println(ESP.getFreeHeap());
 }
@@ -253,7 +276,10 @@ void loop()
 {
     server.handleClient();
     
-    // Kontinuierliche Ambilight-Berechnung (100ms = 10 FPS für anderen ESP)
+    // OTA: handle pending uploads (no-op until one arrives)
+    ArduinoOTA.handle();
+    
+    // Kontinuierliche Ambilight-Berechnung (100ms = 10 FPS für dem Leuchter)
     static unsigned long lastAmbilight = 0;
     unsigned long now = millis();
     if (now - lastAmbilight > 100) {
@@ -261,10 +287,18 @@ void loop()
         lastAmbilight = now;
     }
     
-    // Heartbeat alle 10 Sekunden
+    // Health byte 0x80 from the Leuchter: count, never wait for it
+    udp_sender_poll_ack();
+    
+    // Heartbeat alle 10 Sekunden (with UDP stats: sent/acked/failed)
     static unsigned long lastHeartbeat = 0;
     if (now - lastHeartbeat > 10000) {
-        Serial.println("[loop] Heartbeat - Server läuft");
+        Serial.print("[loop] Heartbeat - Server läuft, UDP: sent ");
+        Serial.print(udp_sender_get_sent_frames());
+        Serial.print(", acked ");
+        Serial.print(udp_sender_get_acked_frames());
+        Serial.print(", failed ");
+        Serial.println(udp_sender_get_failed_frames());
         lastHeartbeat = now;
     }
 }

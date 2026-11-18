@@ -230,4 +230,10 @@ Nothing blocks as install issue — no need to ask about missing software.
 ## Open questions (ask before implementation)
 
 1. UDP port? Suggest **1900** (Hyperion's default) — or the Sucher uses another?
+   → Settled: 1900 on both sides.
 2. The Sucher is currently not yet sending frames (see `sucher/src/main.cpp`); it must adopt the same Hyperion protocol + `0x80` answer on its side — coordinated in a follow-up task.
+   → Done: the new Sucher `sucher2/sucher` sends Hyperion frames in
+   `src/udp_sender.cpp` (`AA 00 FF <chk> RGB…`, clockwise order, to
+   `LEUCHTER_IP:1900`) and receives the `0x80` health byte for its stats;
+   the old ESP-NOW sender is gone. It also carries `ArduinoOTA`
+   (hostname `hanawa-sucher`, `env:ota` in its `platformio.ini`).

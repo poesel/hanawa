@@ -1,5 +1,18 @@
 # Ambilight Datenprotokoll v1.0
 
+> **TRANSPORT-CHANGE**: The Sucher and the Leuchter do not communicate
+> per ESP-NOW any more. The Sucher (`sucher2/sucher`, sender code
+> `src/udp_sender.h/.cpp`) now speaks the **Hyperion UDP LED protocol**
+> (see `leuchter/PLAN.md`): one UDP datagram per frame `AA 00 FF <chk> RGB…`
+> to `LEUCHTER_IP:1900`, and the Leuchter answers each applied frame with
+> the health byte `0x80`. The ESP-NOW packet split and the header with
+> `packet_num`/`total_packets`/`h_segments`/`v_segments` are **obsolete**.
+> Still valid from this document: the RGB triplets, the clockwise order
+> (Top links→right, Right oben→down, Bottom right→links, Left
+> down→oben) and `total_rectangles = 2*hSeg + 2*(vSeg-2)` (the frame's
+> triplet count is that number, up to `MAX_SEND_LEDS = 150` = the
+> Leuchter's `MAX_LEDS`).
+
 ## Übersicht
 
 Dieses Dokument beschreibt das binäre Protokoll zur Übertragung von Ambilight-Farbdaten zwischen zwei ESP32-Geräten via ESP-NOW.
