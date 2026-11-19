@@ -40,7 +40,13 @@
 
 /* ---------------- OTA (Over-The-Air updates) ----------------
  * ArduinoOTA (bundled in the ESP32 core) lets new builds be pushed
- * over WLAN after one last serial flash; see doc/BENUTZERHANDBUCH.md. */
+ * over WLAN after one last serial flash; see doc/BENUTZERHANDBUCH.md.
+ * OTA_PROJECT_VERSION is appended to the hostname, so the ESP answers
+ * on mDNS as "hanawa-sucher-v1.local" and an OTA-uploaded build can be
+ * told apart from an older one. Bump it with every build you push. */
+#ifndef OTA_PROJECT_VERSION
+#define OTA_PROJECT_VERSION "v1"
+#endif
 #ifndef OTA_HOSTNAME
 #define OTA_HOSTNAME    "hanawa-sucher"
 #endif

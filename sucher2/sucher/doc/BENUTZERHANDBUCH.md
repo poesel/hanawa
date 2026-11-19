@@ -155,8 +155,10 @@ Die Antwort enthält RGB-Werte (0-255) für jedes Fenster sowie die Rechteck-Koo
 
 ## 8.1 OTA (Over-The-Air updates)
 
-The sketch carries `ArduinoOTA` (hostname `hanawa-sucher`, port 8266 in
-`config.h`), so after **one last serial flash** new builds can be pushed
+The sketch carries `ArduinoOTA` (hostname `hanawa-sucher-v1`, port 8266 in
+`config.h` - `OTA_PROJECT_VERSION` is appended to the hostname, so an OTA
+build is recognizable via mDNS as `hanawa-sucher-v1.local` and in the
+console log), so after **one last serial flash** new builds can be pushed
 over WLAN - no cable needed (same scheme as the Leuchter):
 
 ```bash
@@ -168,8 +170,21 @@ pio run -d sucher2/sucher -e ota -t upload --upload-port <ESP-IP>
 
 - ArduinoOTA sits on its own port 8266, so it does not clash with the
   UDP sender to the Leuchter at `:1900`.
+- `platformio.ini` sets `board_build.partitions = ota_nofs_4MB.csv` in both
+  envs. The `esp32cam` board default (`huge_app.csv`) has **one single app
+  slot and no OTA slot**, so ArduinoOTA has nowhere to write:
+  `esp_ota_get_next_update_partition()` returns the running partition,
+  `Update::begin()` fails with "Partition Could Not be Found" (that line
+  only shows up on the serial console) and `espota.py` reports "No response
+  from device" even though the `OK` to the invitation arrived over UDP.
+  `ota_nofs_4MB.csv` provides two ~1.9 MB app slots (`app0 @0x10000`,
+  `app1 @0x200000`) on this 4 MB flash, which is what ArduinoOTA
+  alternates between. That serial flash writes bootloader + partition
+  table + app, i.e. it also replaces the ESP32-CAM's factory/staging
+  firmware: the cam's own web interface goes away, this sketch serves
+  its own HTTP API instead.
 - No `setPassword()` is used: any device on the LAN that knows the
-  hostname `hanawa-sucher` can flash it.
+  hostname `hanawa-sucher-v1` can flash it.
 - A failed upload leaves the old sketch running, the ESP is not bricked.
 
 ## 9. Lizenz

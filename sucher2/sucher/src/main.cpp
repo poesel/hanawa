@@ -252,7 +252,7 @@ void setup()
     // over serial - after that: pio run -d sucher2/sucher -e ota -t upload
     // --upload-port <this ESP's IP>. ArduinoOTA listens on its own port,
     // so it does not clash with the UDP sender at :1900.
-    ArduinoOTA.setHostname(OTA_HOSTNAME);
+    ArduinoOTA.setHostname(OTA_HOSTNAME "-" OTA_PROJECT_VERSION);
     ArduinoOTA.setPort(OTA_PORT);
     ArduinoOTA.onStart([]() {
         Serial.println("OTA start: receiving sketch over WLAN");
@@ -263,6 +263,9 @@ void setup()
     ArduinoOTA.onError([](ota_error_t err) {
         Serial.print("OTA error ");
         Serial.println((int)err);
+        // 1 = OTA_BEGIN_ERROR: usually "Partition Could Not be Found" - the
+        // running flash layout has no free OTA app slot (see the partitions
+        // line in platformio.ini). 2 = connect, 3 = receive, 4 = end.
     });
     ArduinoOTA.begin();
     Serial.print("OTA ready, upload to this ESP at :");

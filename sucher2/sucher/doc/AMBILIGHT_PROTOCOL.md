@@ -7,11 +7,12 @@
 > to `LEUCHTER_IP:1900`, and the Leuchter answers each applied frame with
 > the health byte `0x80`. The ESP-NOW packet split and the header with
 > `packet_num`/`total_packets`/`h_segments`/`v_segments` are **obsolete**.
-> Still valid from this document: the RGB triplets, the clockwise order
-> (Top links→right, Right oben→down, Bottom right→links, Left
-> down→oben) and `total_rectangles = 2*hSeg + 2*(vSeg-2)` (the frame's
-> triplet count is that number, up to `MAX_SEND_LEDS = 150` = the
-> Leuchter's `MAX_LEDS`).
+> Still valid from this document: the RGB triplets and
+> `total_rectangles = 2*hSeg + 2*(vSeg-2)`. The clockwise order now
+> **starts at the stripe's LED 0, which is mounted at the TOP RIGHT
+> corner**: Right oben→down, Bottom right→links, Left down→oben,
+> Top links→right (final stripe: hSeg=40, vSeg=26 → 40+40 top/bottom,
+> 24+24 sides = 128 LEDs, see udp_sender.cpp).
 
 ## Übersicht
 

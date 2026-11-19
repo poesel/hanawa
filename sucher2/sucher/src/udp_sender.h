@@ -14,8 +14,10 @@
 //   [3] checksum (low byte of sum of bytes[0..2] + all color bytes)
 //   [4..] RGB triplets, LED 0..n-1
 //
-// The RGB order is the clockwise order from doc/AMBILIGHT_PROTOCOL.md
-// (Top left→right, Right top→bottom, Bottom right→left, Left bottom→top).
+// The RGB order is clockwise, but starts at the strip's LED 0 at the TOP
+// RIGHT corner (final mounting): Right top→bottom, Bottom right→left,
+// Left bottom→top, Top left→right. With hSeg=40, vSeg=26 the 128-LED
+// stripe gets exactly one triplet per LED (40+40 top/bottom, 24+24 sides).
 // The Leuchter answers each applied frame with a one-byte UDP packet
 // 0x80 (HEALTH_BYTE) back to the sender IP + sender port → counted
 // as stats for frame-sync. No ESP-NOW and no packet split any more.

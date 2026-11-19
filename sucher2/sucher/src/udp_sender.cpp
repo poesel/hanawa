@@ -66,14 +66,14 @@ void udp_send_ambilight(const AmbilightResult& result) {
     pkt[off++] = c.b;
   };
 
-  // Top (links → rechts)
-  for (const auto& c : result.topColors) push(c);
-  // Right (oben → unten, without Ecken)
+  // Clockwise loop, but starting at the strip's LED 0 at the TOP RIGHT corner:
+  // Right (oben → unten) → Bottom (rechts → links) → Left (unten → oben) → Top (links → rechts)
+  // (the stripe was remounted with LED 0 top right: LED 0..23 down the right
+  //  edge, ..bottom right→left, ..left bottom→top, ..top left→right)
   for (const auto& c : result.rightColors) push(c);
-  // Bottom (rechts → links, rückwärts!)
   for (auto it = result.bottomColors.rbegin(); it != result.bottomColors.rend(); ++it) push(*it);
-  // Left (unten → oben, rückwärts!)
   for (auto it = result.leftColors.rbegin(); it != result.leftColors.rend(); ++it) push(*it);
+  for (const auto& c : result.topColors) push(c);
 
   pkt[0] = 0xAA;  // magic
   pkt[1] = 0x00;  // no command

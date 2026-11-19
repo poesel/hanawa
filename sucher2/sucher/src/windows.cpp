@@ -16,8 +16,8 @@ AmbilightConfig g_ambilightConfig = {
     {295.0, 25.0},   // topRight
     {295.0, 215.0},  // botRight
     {25.0, 215.0},   // botLeft
-    10,              // hSeg (default)
-    8,               // vSeg (default)
+    40,              // hSeg: 40 Rectangles each top + bottom (final stripe: 128 LEDs)
+    26,              // vSeg: vSeg-2 = 24 Rectangles each left + right
     true             // isValid (default Punkte sind gültig)
 };
 
@@ -280,8 +280,8 @@ String processAmbilight(const String& jsonInput) {
 
     int hSeg = doc["hSeg"].as<int>();
     int vSeg = doc["vSeg"].as<int>();
-    int xwindows = (hSeg > 0) ? hSeg : 10;  // Default: 10
-    int ywindows = (vSeg > 0) ? vSeg : 8;   // Default: 8
+    int xwindows = (hSeg > 0) ? hSeg : 40;  // Default: 40 (final stripe)
+    int ywindows = (vSeg > 0) ? vSeg : 26;  // Default: 26 → 24 left/right
     
     Serial.print("[processAmbilight] Parameter: hSeg=");
     Serial.print(xwindows);
@@ -528,8 +528,8 @@ void updateAmbilightConfig(const String& jsonInput) {
     
     int hSeg = doc["hSeg"].as<int>();
     int vSeg = doc["vSeg"].as<int>();
-    g_ambilightConfig.hSeg = (hSeg > 0) ? hSeg : 10;  // Default: 10
-    g_ambilightConfig.vSeg = (vSeg > 0) ? vSeg : 8;   // Default: 8
+    g_ambilightConfig.hSeg = (hSeg > 0) ? hSeg : 40;  // Default: 40 (final stripe)
+    g_ambilightConfig.vSeg = (vSeg > 0) ? vSeg : 26;  // Default: 26 → 24 left/right
     g_ambilightConfig.isValid = true;
     
     Serial.print("[updateConfig] Konfiguration gesetzt: TL(");
