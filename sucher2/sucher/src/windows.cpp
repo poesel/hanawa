@@ -393,7 +393,11 @@ String processAmbilight(const String& jsonInput) {
 
     // JSON-Response erstellen
     Serial.println("[processAmbilight] Erstelle JSON-Response...");
-    DynamicJsonDocument outDoc(8192); // Größerer Buffer für alle Farben
+    // 128 Fensters (hSeg=40, vSeg=26): every number costs one VariantSlot
+    // (~16 Bytes) because platformio.ini sets ARDUINOJSON_USE_DOUBLE=0, and
+    // a window is 4 slots (RGB array) + 5 slots (rect object) = ~144 Bytes
+    // -> ~19 KB for colors + rects of all four sides, keep some spare
+    DynamicJsonDocument outDoc(24576);
     JsonArray topColors = outDoc.createNestedArray("top");
     JsonArray bottomColors = outDoc.createNestedArray("bottom");
     JsonArray leftColors = outDoc.createNestedArray("left");
@@ -667,8 +671,10 @@ String getAmbilightResult() {
     Serial.println(g_ambilightResult.rightColors.size());
     
     // DynamicJsonDocument für automatische Größenanpassung
-    // Geschätzt: 32 Rechtecke * 100 Bytes = 3200 + Overhead = ~4000 Bytes
-    DynamicJsonDocument doc(6144);
+    // With ARDUINOJSON_USE_DOUBLE=0 (see platformio.ini) every number is one
+    // VariantSlot (~16 Bytes), so the 128 Fensters of hSeg=40/vSeg=26
+    // (colors + rects) need ~10 KB - keep some spare
+    DynamicJsonDocument doc(24576);
     
     // Top-Farben und Rechtecke
     JsonArray topColors = doc.createNestedArray("top");
@@ -741,7 +747,7 @@ String getAmbilightResult() {
     
     Serial.print("[getResult] JSON-Größe: ");
     Serial.print(jsonSize);
-    Serial.print(" bytes (capacity: 6144, overflow: ");
+    Serial.print(" bytes (capacity: 12288, overflow: ");
     Serial.print(doc.overflowed() ? "JA!" : "nein");
     Serial.print(", free heap: ");
     Serial.print(ESP.getFreeHeap());

@@ -236,7 +236,8 @@ Nothing blocks as install issue — no need to ask about missing software.
    `src/udp_sender.cpp` (`AA 00 FF <chk> RGB…`, clockwise order, to
    `LEUCHTER_IP:1900`) and receives the `0x80` health byte for its stats;
    the old ESP-NOW sender is gone. It also carries `ArduinoOTA`
-   (hostname `hanawa-sucher-v1`, `env:ota` in its `platformio.ini`), which
+   (hostname `hanawa-sucher-v3`, port 3232 = the ESP32 core's ArduinoOTA
+   default, `env:ota` in its `platformio.ini`), which
    needs the `ota_nofs_4MB.csv` partition table - the board default
    `huge_app.csv` has no OTA slot, so `espota.py` only ever reported
    "No response from device".

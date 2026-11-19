@@ -138,7 +138,8 @@ void handle_grid()
         p[i].y = pts[i]["y"].as<float>();
     }
 
-    DynamicJsonDocument outDoc(2048);
+    // 2*hSeg + 2*vSeg = 132 Gitterpoints (hSeg=40/vSeg=26) * ~64 Bytes
+    DynamicJsonDocument outDoc(12288);
     JsonArray arr = outDoc.createNestedArray("points");
 
     auto addIntermediates = [&](P a, P b, int count) {
@@ -194,6 +195,19 @@ void handle_ambilight()
     server.send(200, "application/json", response);
 }
 
+// API: Diagnose-Status (GET) - Uptime, free heap und vor allem die UDP-Zähler
+// (frames sent to the Leuchter vs. the 0x80 health bytes that came back), so
+// the frame stream can be tested over WLAN without a serial console.
+void handle_stats()
+{
+    String response = "{\"uptimeMs\":" + String((unsigned long)millis()) +
+                      ",\"freeHeap\":" + String(ESP.getFreeHeap()) +
+                      ",\"udp\":{\"sent\":" + String(udp_sender_get_sent_frames()) +
+                      ",\"acked\":" + String(udp_sender_get_acked_frames()) +
+                      ",\"failed\":" + String(udp_sender_get_failed_frames()) + "}}";
+    server.send(200, "application/json", response);
+}
+
 void setup()
 {
     Serial.begin(115200);
@@ -244,6 +258,10 @@ void setup()
     server.on("/api/ambilight", HTTP_GET, []() {
         logRequest();
         handle_ambilight();
+    });
+    server.on("/api/stats", HTTP_GET, []() {
+        logRequest();
+        handle_stats();
     });
     server.begin();
     

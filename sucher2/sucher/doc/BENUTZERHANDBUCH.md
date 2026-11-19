@@ -77,10 +77,12 @@ Rufe im Browser `http://<IP-Adresse>/` auf.
 
 | Pfad               | Methode | Beschreibung                          |
 |--------------------|---------|----------------------------------------|
-| `/`                | GET     | Eingebettete HTML-Seite mit Videostream |
-| `/stream`          | GET     | MJPEG-Stream (multipart/x-mixed)        |
+| `/`                | GET     | Eingebettete HTML-Seite mit Videostream (JS-polling von `/api/snapshot`) |
+| `/api/snapshot`    | GET     | Single JPEG-Standbild                  |
 | `/api/grid`        | POST    | JSON-API zur Rasterberechnung          |
-| `/api/ambilight`   | POST    | JSON-API für Ambilight-Farbberechnung  |
+| `/api/config`      | POST    | Raster/Ambilight-Configuration updated |
+| `/api/ambilight`   | GET     | Ambilight-Farbberechnung (cached colors + rects) |
+| `/api/stats`       | GET     | Diagnose: uptime, free heap and the UDP counters (`sent`/`acked`/`failed` towards the Leuchter) |
 
 ### 7.1 MJPEG-Stream
 Der Stream kann z. B. in **VLC** eingebunden werden:
@@ -155,9 +157,9 @@ Die Antwort enthält RGB-Werte (0-255) für jedes Fenster sowie die Rechteck-Koo
 
 ## 8.1 OTA (Over-The-Air updates)
 
-The sketch carries `ArduinoOTA` (hostname `hanawa-sucher-v1`, port 8266 in
+The sketch carries `ArduinoOTA` (hostname `hanawa-sucher-v3`, port 3232 in
 `config.h` - `OTA_PROJECT_VERSION` is appended to the hostname, so an OTA
-build is recognizable via mDNS as `hanawa-sucher-v1.local` and in the
+build is recognizable via mDNS as `hanawa-sucher-v3.local` and in the
 console log), so after **one last serial flash** new builds can be pushed
 over WLAN - no cable needed (same scheme as the Leuchter):
 
@@ -168,8 +170,11 @@ pio run -d sucher2/sucher -e esp32cam -t upload
 pio run -d sucher2/sucher -e ota -t upload --upload-port <ESP-IP>
 ```
 
-- ArduinoOTA sits on its own port 8266, so it does not clash with the
-  UDP sender to the Leuchter at `:1900`.
+- ArduinoOTA sits on the ESP32 core's default port 3232, which is also the
+  default of the ESP32 core's `espota.py` - that is why `--upload-port <IP>`
+  needs no port argument here. The UDP sender to the Leuchter uses `:1900`,
+  so nothing clashes. (The Leuchter's ESP8266 core uses 8266 instead; that
+  port only belongs to that core.)
 - `platformio.ini` sets `board_build.partitions = ota_nofs_4MB.csv` in both
   envs. The `esp32cam` board default (`huge_app.csv`) has **one single app
   slot and no OTA slot**, so ArduinoOTA has nowhere to write:
@@ -184,7 +189,7 @@ pio run -d sucher2/sucher -e ota -t upload --upload-port <ESP-IP>
   firmware: the cam's own web interface goes away, this sketch serves
   its own HTTP API instead.
 - No `setPassword()` is used: any device on the LAN that knows the
-  hostname `hanawa-sucher-v1` can flash it.
+  hostname `hanawa-sucher-v3` can flash it.
 - A failed upload leaves the old sketch running, the ESP is not bricked.
 
 ## 9. Lizenz
