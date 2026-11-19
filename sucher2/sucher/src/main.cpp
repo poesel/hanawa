@@ -204,8 +204,39 @@ void handle_stats()
                       ",\"freeHeap\":" + String(ESP.getFreeHeap()) +
                       ",\"udp\":{\"sent\":" + String(udp_sender_get_sent_frames()) +
                       ",\"acked\":" + String(udp_sender_get_acked_frames()) +
-                      ",\"failed\":" + String(udp_sender_get_failed_frames()) + "}}";
+                      ",\"failed\":" + String(udp_sender_get_failed_frames()) +
+                      ",\"brightness\":" + String(udp_sender_get_brightness()) + "}}";
     server.send(200, "application/json", response);
+}
+
+// API: Brightness-Slider (POST {"value":0..100}) - scales the outgoing UDP
+// frames (0 % = Leuchter gets black frames = off). Applied by the sender
+// itself when packing, so it also works after a reboot until then 100 %.
+void handle_brightness()
+{
+    if (server.hasArg("plain") == false) {
+        server.send(400, "text/plain", "No body");
+        return;
+    }
+
+    String body = server.arg("plain");
+    int value = body.toInt();  // accepts "50" or a JSON body with a number
+
+    // also accept {"value":50} from the web UI slider
+    if (body.indexOf("value") >= 0) {
+        int colon = body.indexOf(':');
+        if (colon >= 0) {
+            String rest = body.substring(colon + 1);
+            value = rest.toInt();
+        }
+    }
+
+    udp_sender_set_brightness(value);
+
+    String response = "{\"status\":\"ok\",\"brightness\":" + String(udp_sender_get_brightness()) + "}";
+    server.send(200, "application/json", response);
+    Serial.print("[handle_brightness] Brightness set to ");
+    Serial.println(udp_sender_get_brightness());
 }
 
 void setup()
@@ -262,6 +293,10 @@ void setup()
     server.on("/api/stats", HTTP_GET, []() {
         logRequest();
         handle_stats();
+    });
+    server.on("/api/brightness", HTTP_POST, []() {
+        logRequest();
+        handle_brightness();
     });
     server.begin();
     

@@ -82,7 +82,8 @@ Rufe im Browser `http://<IP-Adresse>/` auf.
 | `/api/grid`        | POST    | JSON-API zur Rasterberechnung          |
 | `/api/config`      | POST    | Raster/Ambilight-Configuration updated |
 | `/api/ambilight`   | GET     | Ambilight-Farbberechnung (cached colors + rects) |
-| `/api/stats`       | GET     | Diagnose: uptime, free heap and the UDP counters (`sent`/`acked`/`failed` towards the Leuchter) |
+| `/api/stats`       | GET     | Diagnose: uptime, free heap and the UDP counters (`sent`/`acked`/`failed` + current `brightness` towards the Leuchter) |
+| `/api/brightness`  | POST    | Brightness-Slider 0–100 % (0 = off) – scales the colors in the outgoing UDP frames |
 
 ### 7.1 MJPEG-Stream
 Der Stream kann z. B. in **VLC** eingebunden werden:
@@ -148,6 +149,22 @@ Diese API berechnet RGB-Durchschnittswerte für Rechtecke entlang der vier Ränd
 
 Die Antwort enthält RGB-Werte (0-255) für jedes Fenster sowie die Rechteck-Koordinaten zur Visualisierung.
 
+### 7.4 Brightness-Slider (0–100 %, 0 = off)
+The web UI carries a slider (`input type="range"`) beside the segment inputs.
+Dragging it pushes the value to the server via
+
+```
+POST /api/brightness   {"value": 0..100}
+```
+
+The sender in `udp_sender.cpp` scales every RGB triplet of every frame by
+this factor before packing (the checksum covers the scaled bytes), so the
+Leuchter really receives the dimmed colors. `value = 0` sends black frames
+→ stripe completely off. The setting lives as long as the sketch runs
+(reboot → back to 100 %) and is also reported in `/api/stats`
+(`"brightness": <pct>`). The overlay in the web UI shows the scaled
+preview colors accordingly.
+
 ## 8. Fehlersuche
 | Problem | Lösung |
 |---------|--------|
@@ -157,9 +174,9 @@ Die Antwort enthält RGB-Werte (0-255) für jedes Fenster sowie die Rechteck-Koo
 
 ## 8.1 OTA (Over-The-Air updates)
 
-The sketch carries `ArduinoOTA` (hostname `hanawa-sucher-v3`, port 3232 in
+The sketch carries `ArduinoOTA` (hostname `hanawa-sucher-v4`, port 3232 in
 `config.h` - `OTA_PROJECT_VERSION` is appended to the hostname, so an OTA
-build is recognizable via mDNS as `hanawa-sucher-v3.local` and in the
+build is recognizable via mDNS as `hanawa-sucher-v4.local` and in the
 console log), so after **one last serial flash** new builds can be pushed
 over WLAN - no cable needed (same scheme as the Leuchter):
 
@@ -189,7 +206,7 @@ pio run -d sucher2/sucher -e ota -t upload --upload-port <ESP-IP>
   firmware: the cam's own web interface goes away, this sketch serves
   its own HTTP API instead.
 - No `setPassword()` is used: any device on the LAN that knows the
-  hostname `hanawa-sucher-v3` can flash it.
+  hostname `hanawa-sucher-v4` can flash it.
 - A failed upload leaves the old sketch running, the ESP is not bricked.
 
 ## 9. Lizenz

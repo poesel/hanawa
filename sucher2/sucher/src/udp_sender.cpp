@@ -16,6 +16,11 @@ static uint32_t g_sent_frames = 0;
 static uint32_t g_acked_frames = 0;
 static uint32_t g_failed_frames = 0;
 
+// Brightness of the outgoing frames in percent (0..100, 0 = off).
+// Scaled into the RGB triplets when packing, so the Leuchter itself
+// receives the dimmed colors (checksum covers the scaled bytes).
+static int g_brightness_pct = 100;
+
 WiFiUDP tx;   // Hyperion-frames to the Leuchter
 WiFiUDP ack;  // health byte 0x80 back from the Leuchter
 
@@ -60,10 +65,14 @@ void udp_send_ambilight(const AmbilightResult& result) {
   static uint8_t pkt[4 + MAX_SEND_LEDS * 3];
   int off = 4;
 
+  // Brightness-Skalierung (0..100 %, 0 = off): every triplet gets scaled
+  // before packing, checksum is computed over the scaled bytes
+  const int pct = g_brightness_pct < 0 ? 0 : (g_brightness_pct > 100 ? 100 : g_brightness_pct);
+
   auto push = [&](const RGB& c) {
-    pkt[off++] = c.r;
-    pkt[off++] = c.g;
-    pkt[off++] = c.b;
+    pkt[off++] = (uint8_t)(((uint16_t)c.r * pct) / 100);
+    pkt[off++] = (uint8_t)(((uint16_t)c.g * pct) / 100);
+    pkt[off++] = (uint8_t)(((uint16_t)c.b * pct) / 100);
   };
 
   // Clockwise loop, but starting at the strip's LED 0 at the TOP RIGHT corner:
@@ -126,4 +135,13 @@ uint32_t udp_sender_get_acked_frames() {
 
 uint32_t udp_sender_get_failed_frames() {
   return g_failed_frames;
+}
+
+void udp_sender_set_brightness(int percent) {
+  g_brightness_pct = percent < 0 ? 0 : (percent > 100 ? 100 : percent);
+  Serial.printf("[UDP] Brightness set to %d%% (0 = off)\n", g_brightness_pct);
+}
+
+int udp_sender_get_brightness() {
+  return g_brightness_pct;
 }

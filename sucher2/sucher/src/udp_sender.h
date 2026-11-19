@@ -31,6 +31,13 @@ void udp_send_ambilight(const AmbilightResult& result);
 // (call regularly in loop())
 void udp_sender_poll_ack();
 
+// Brightness slider (0..100 %, 0 = off). The sender scales every RGB
+// triplet of a frame by this factor before packing, so the Leuchter gets
+// dimmed or black frames (0 % = all LEDs off). Set from the web UI via
+// POST /api/brightness.
+void udp_sender_set_brightness(int percent);
+int udp_sender_get_brightness();
+
 // Gibt Statistiken zurück
 uint32_t udp_sender_get_sent_frames();
 uint32_t udp_sender_get_acked_frames();

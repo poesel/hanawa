@@ -235,8 +235,12 @@ Nothing blocks as install issue — no need to ask about missing software.
    → Done: the new Sucher `sucher2/sucher` sends Hyperion frames in
    `src/udp_sender.cpp` (`AA 00 FF <chk> RGB…`, clockwise order, to
    `LEUCHTER_IP:1900`) and receives the `0x80` health byte for its stats;
-   the old ESP-NOW sender is gone. It also carries `ArduinoOTA`
-   (hostname `hanawa-sucher-v3`, port 3232 = the ESP32 core's ArduinoOTA
+   the old ESP-NOW sender is gone. The Sucher's web UI now has a
+   brightness slider (0–100 %, 0 = off, POST `/api/brightness`): the
+   sender scales every RGB triplet before packing, so a 0 % frame makes
+   the stripe really black (useful to tell sender-side from stripe-side
+   failures). It also carries `ArduinoOTA`
+   (hostname `hanawa-sucher-v4`, port 3232 = the ESP32 core's ArduinoOTA
    default, `env:ota` in its `platformio.ini`), which
    needs the `ota_nofs_4MB.csv` partition table - the board default
    `huge_app.csv` has no OTA slot, so `espota.py` only ever reported

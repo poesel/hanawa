@@ -34,6 +34,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       <label>Vertikale Segmente:
         <input type="number" id="vSeg" value="8" min="1" style="width:60px;">
       </label>
+      <br/>
+      <label>Brightness (%):
+        <input type="range" id="bright" min="0" max="100" value="100" step="5" style="width:120px;">
+      </label>
+      <span id="brightVal">100 %</span>
     </div>
 
     <button id="reset" style="margin-top:10px;">Punkte zurücksetzen</button>
@@ -53,6 +58,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     let points = [];
     let gridPts = [];
     let ambilightData = null;
+    let brightnessPct = 100; // mirrors the server-side slider (0 = off)
+
+    const brightInput = document.getElementById('bright');
+    const brightVal = document.getElementById('brightVal');
 
     // === SNAPSHOT-POLLING (ersetzt MJPEG-Stream) ===
     let snapshotUpdateRunning = false;
@@ -95,6 +104,30 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     // Snapshot alle 1 Sekunde aktualisieren
     setInterval(updateSnapshot, 1000);
     updateSnapshot(); // Sofort erstes Bild laden
+
+    // === BRIGHTNESS-SLIDER (0..100 %, 0 = off) ===
+    // Slider changes get pushed to the server; the sender scales the RGB
+    // triplets of every UDP frame (0 % -> black frames -> Leuchter off).
+    function pushBrightness(value) {
+      brightnessPct = Math.max(0, Math.min(100, Math.round(value)));
+      brightVal.textContent = brightnessPct + ' %';
+      fetch('/api/brightness', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: brightnessPct })
+      })
+      .then(r => r.json())
+      .then(data => console.log('Brightness gesetzt:', data))
+      .catch(console.error);
+      drawPoints(); // repaint overlay with new brightness
+    }
+
+    if (brightInput) {
+      // fires when the slider thumb is dragged (keyboard + mouse)
+      brightInput.addEventListener('input', (e) => {
+        pushBrightness(brightInput.value);
+      });
+    }
 
     function drawPoints() {
       console.log('drawPoints aufgerufen, ambilightData:', ambilightData ? 'vorhanden' : 'null');
@@ -168,8 +201,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
             console.log(`${side}[0]: Farbe rgb(${r},${g},${b}), Rect (${x1},${y1}) -> (${x2},${y2})`);
           }
           
-          // Fülle das Rechteck mit der berechneten Farbe
-          ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+          // Fülle das Rechteck mit der berechneten Farbe, scaled by the
+          // brightness slider (matches what the Leuchter receives; 0 % = off)
+          const f = brightnessPct / 100;
+          ctx.fillStyle = `rgb(${Math.round(r * f)}, ${Math.round(g * f)}, ${Math.round(b * f)})`;
           ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
           
           // Zeichne grünen Rahmen für bessere Sichtbarkeit

@@ -45,7 +45,7 @@
  * on mDNS as "hanawa-sucher-v3.local" and an OTA-uploaded build can be
  * told apart from an older one. Bump it with every build you push. */
 #ifndef OTA_PROJECT_VERSION
-#define OTA_PROJECT_VERSION "v3"
+#define OTA_PROJECT_VERSION "v4"
 #endif
 #ifndef OTA_HOSTNAME
 #define OTA_HOSTNAME    "hanawa-sucher"
