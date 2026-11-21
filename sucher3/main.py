@@ -1,0 +1,487 @@
+#!/usr/bin/env python3
+"""sucher3 - Ambilight Sucher for Raspberry Pi + Canon PowerShot A80 (PTP)
+
+Does the same as sucher2 (the ESP32-CAM sketch): samples colors along a
+trapezoid window on the TV picture and streams Hyperion UDP frames to the
+Leuchter at 192.168.0.107:1900 (protocol unchanged:
+`AA 00 FF <chk>` + 3 Bytes per LED, clockwise, LED 0 at the stripe's top
+right). Plus the same browser web UI (snapshot polling, 4 click-corners,
+hSeg/vSeg, brightness slider 0-100 % / 0 = off, /api/stats).
+
+Coordinate space: everything (points, rects, sampling) works in the
+FRAME's native pixel space - reported in /api/ambilight as "frameSize".
+The JS UI converts canvas <-> frame space with that.
+
+Usage:
+  python3 main.py --source ptp            # real camera
+  python3 main.py --source synth          # no camera needed (dev/test)
+  python3 main.py --leuchter 192.168.0.40 # test sender against udpcatch
+"""
+import json
+import socket
+import threading
+import time
+from datetime import datetime
+
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from io import BytesIO
+
+from windows import (calculate_ambilight_windows, sample_colors)
+from sender import HyperionSender
+from grabber import Gphoto2Grabber, SyntheticGrabber, frame_from_jpeg
+
+DEFAULTS = {
+    "leuchter_ip": "192.168.0.107",
+    "udp_port": 1900,
+    "max_leds": 150,
+    "points": None,            # set via UI/config; 4 pts in FRAME space
+    "hSeg": 40,                # 128-LED stripe: 40 top + 40 bottom
+    "vSeg": 26,                # 24 + 24 on the sides
+    "brightness": 100,         # percent, 0 = off
+}
+
+STATE = {
+    "config": dict(DEFAULTS),
+    "result": None,            # dict of the last computed ambilight JSON
+    "jpeg": None,              # last frame as JPEG bytes (for /api/snapshot)
+    "frame_size": None,        # (w, h) of the last frame
+    "started": time.time(),
+}
+LOCK = threading.Lock()
+
+
+class AmbilightStateHandler(SimpleHTTPRequestHandler):
+    """HTTP routes mirror the sucher2 sketch (see doc/BENUTZERHANDBUCH.md)."""
+
+    def do_GET(self):
+        route = self.uri_path()
+        if route == "/":
+            self.send_bytes(200, "text/html; charset=utf-8",
+                            INDEX_HTML.encode())
+        elif route == "/api/snapshot":
+            with LOCK:
+                jpg = STATE["jpeg"]
+            if jpg:
+                self.send_bytes(200, "image/jpeg", jpg)
+            else:
+                self.send_bytes(404, "text/plain", b"no frame yet")
+        elif route == "/api/ambilight":
+            with LOCK:
+                res = STATE["result"]
+            self.send_json(200, res if res else {"error": "no config"})
+        elif route == "/api/stats":
+            with LOCK:
+                sender = SENDER
+            self.send_json(200, {
+                "uptimeMs": int((time.time() - STATE["started"]) * 1000),
+                "udp": dict(sender.stats() if sender else {}),
+            })
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        route = self.uri_path()
+        body = self._read_body()
+        if route == "/api/config":
+            ok, err = apply_config(body)
+            self.send_json(200 if ok else 400,
+                           {"status": "ok"} if ok else {"error": err})
+        elif route == "/api/grid":
+            self.send_json(200, grid_response(body))
+        elif route == "/api/brightness":
+            value = parse_value(body)
+            if value is None:
+                self.send_json(400, {"error": "no numeric value"})
+                return
+            SENDER.set_brightness(value)
+            save_state()
+            self.send_json(200, {"status": "ok",
+                                 "brightness": SENDER.brightness})
+        else:
+            self.send_error(404)
+
+    # ---- helpers ---------------------------------------------------------
+    def uri_path(self):
+        return self.path.split("?")[0]
+
+    def send_json(self, code, obj):
+        self.send_bytes(code, "application/json",
+                        json.dumps(obj).encode())
+
+    def send_bytes(self, code, ctype, data):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _read_body(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        raw = self.rinput = self.rfile.read(n) if n else b""
+        try:
+            return json.loads(raw)
+        except Exception:
+            return raw.decode(errors="ignore")
+
+
+def parse_value(body):
+    if isinstance(body, dict):
+        v = body.get("value")
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(body, str):
+        try:
+            return int(body)
+        except ValueError:
+            return None
+    return None
+
+
+def apply_config(body):
+    """Update points/hSeg/vSeg from a JSON body (as in sucher2's
+    /api/config; points are in FRAME space here)."""
+    try:
+        data = json.loads(body) if isinstance(body, str) else body
+        pts = data["points"]
+        if len(pts) != 4:
+            return False, "need 4 points"
+        with LOCK:
+            STATE["config"]["points"] = [(float(p["x"]), float(p["y"]))
+                                         for p in pts]
+            STATE["config"]["hSeg"] = int(data.get("hSeg")
+                                          or STATE["config"]["hSeg"])
+            STATE["config"]["vSeg"] = int(data.get("vSeg")
+                                          or STATE["config"]["vSeg"])
+        save_state()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def grid_response(body):
+    """Echo the intermediate points of the trapezoid - same formulas as
+    sucher2's handle_grid (hSeg-1 pts between p0-p1 and p2-p3, vSeg-1
+    between p1-p2 and p3-p0), order: top, bottom(rev), right, left(rev)."""
+    try:
+        data = json.loads(body) if isinstance(body, str) else body
+        pts = [(float(p["x"]), float(p["y"])) for p in data["points"]]
+        h = int(data.get("hSeg", 4))
+        v = int(data.get("vSeg", 4))
+    except Exception:
+        return {"error": "bad body"}
+    if len(pts) != 4:
+        return {"error": "need 4 points"}
+
+    def interp(a, b, n):
+        out = []
+        for t in range(1, n):
+            f = t / n
+            out.append({"x": a[0] + (b[0] - a[0]) * f,
+                        "y": a[1] + (b[1] - a[1]) * f})
+        return out
+
+    p = pts
+    return {"points": interp(p[0], p[1], h) + interp(p[2], p[3], h)
+            + interp(p[1], p[2], v) + interp(p[3], p[0], v)}
+
+
+SENDER = HyperionSender()  # (re)created in main() with the CLI args
+
+
+class ComputeLoop:
+    """Grabs frames, computes colors, sends UDP frames - like the sketch's
+    loop() with calculateAmbilightContinuous() every 100 ms."""
+
+    def __init__(self, source):
+        self.source = source
+
+    def run(self, fps):
+        while True:
+            t0 = time.time()
+            self.poll_once()
+            dt = time.time() - t0
+            time.sleep(max(0.0, 1.0 / fps - dt))
+
+    def poll_once(self):
+        cfg = STATE["config"]
+        if not cfg["points"]:
+            return  # no window configured -> nothing to compute
+        jpeg = self.source.grab()
+        if jpeg is None:
+            return
+        frame = frame_from_jpeg(jpeg)
+        if frame is None:
+            return
+        w, h = frame.size
+        # sucher2 point order: [topLeft, topRight, botRight, botLeft]
+        tl, tr, br, bl = cfg["points"]
+        top, bottom, left, right = calculate_ambilight_windows(
+            tl, tr, bl, br, cfg["hSeg"], cfg["vSeg"])
+        topc = sample_colors(frame, w, h, top)
+        bottomc = sample_colors(frame, w, h, bottom)
+        leftc = sample_colors(frame, w, h, left)
+        rightc = sample_colors(frame, w, h, right)
+
+        # packing for the stripe: LED 0 at top right, clockwise
+        colors = (list(rightc) + list(reversed(bottomc))
+                  + list(reversed(leftc)) + list(topc))
+        SENDER.send_frame(colors)
+        SENDER.poll_ack()
+
+        with LOCK:
+            STATE["jpeg"] = jpeg
+            STATE["frame_size"] = (w, h)
+            STATE["result"] = {
+                "timestamp": int(time.time() * 1000),
+                "frameSize": [w, h],
+                "top": [list(c) for c in topc],
+                "bottom": [list(c) for c in bottomc],
+                "left": [list(c) for c in leftc],
+                "right": [list(c) for c in rightc],
+                "topRects": top, "bottomRects": bottom,
+                "leftRects": left, "rightRects": right,
+            }
+
+
+INDEX_HTML = r"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>sucher3 - Raspberry Pi + Canon A80</title>
+  <style>
+    #stream-container { position: relative; display: inline-block; }
+    #overlay { position: absolute; left: 0; top: 0; pointer-events: none; }
+    #coords { display: inline-block; vertical-align: top; margin-left: 20px; }
+    button { margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <h1>sucher3 Live View (Canon PowerShot A80, PTP) - v1</h1>
+  <div id="stream-container">
+    <img id="stream" width="640" height="480"/>
+    <canvas id="overlay" width="640" height="480"></canvas>
+  </div>
+  <div id="coords">
+    <h3>Klick-Koordinaten (image space):</h3>
+    <ol id="coordList"></ol>
+
+    <div style="margin-top:10px;">
+      <label>Horizontale Segmente:
+        <input type="number" id="hSeg" value="40" min="1" style="width:60px;">
+      </label>
+      <br/>
+      <label>Vertikale Segmente:
+        <input type="number" id="vSeg" value="26" min="1" style="width:60px;">
+      </label>
+      <br/>
+      <label>Brightness (%):
+        <input type="range" id="bright" min="0" max="100" value="100"
+               step="5" style="width:120px;">
+      </label>
+      <span id="brightVal">100 %</span>
+    </div>
+
+    <button id="reset" style="margin-top:10px;">Punkte zurückseet</button>
+    <br/>
+    <button id="ambilight" style="margin-top:10px;">Aktualisieren</button>
+  </div>
+
+  <script>
+    // Canvas is 640x480; the frame comes at the camera's own size
+    // ("frameSize" from /api/ambilight). scale maps frame -> canvas.
+    const overlay = document.getElementById('overlay');
+    const ctx = overlay.getContext('2d');
+    const streamImg = document.getElementById('stream');
+    const coordList = document.getElementById('coordList');
+    const resetBtn = document.getElementById('reset');
+    const ambilightBtn = document.getElementById('ambilight');
+    const brightInput = document.getElementById('bright');
+    const brightVal = document.getElementById('brightVal');
+
+    let points = [];      // FRAME space
+    let gridPts = [];     // FRAME space
+    let ambilightData = null;
+    let brightnessPct = 100;
+    let frameSize = null; // [w,h]
+
+    function scale() { return frameSize ? 640 / frameSize[0] : 1; }
+
+    function updateSnapshot() {
+      fetch('/api/snapshot?t=' + Date.now())
+        .then(r => { if (!r.ok) throw new Error('snapshot ' + r.status);
+                     return r.blob(); })
+        .then(blob => { const url = URL.createObjectURL(blob);
+                        streamImg.onload = () => URL.revokeObjectURL(url);
+                        streamImg.src = url; })
+        .catch(console.error);
+    }
+    setInterval(updateSnapshot, 1000);
+    updateSnapshot();
+
+    function drawPoints() {
+      ctx.clearRect(0, 0, overlay.width, overlay.height);
+      if (ambilightData) drawAmbilightRects(ambilightData);
+      const s = scale();
+      ctx.fillStyle = 'red';
+      points.forEach(p => { ctx.beginPath();
+        ctx.arc(p.x * s, p.y * s, 5, 0, 2 * Math.PI); ctx.fill(); });
+      if (points.length === 4) {
+        ctx.strokeStyle = 'lime'; ctx.lineWidth = 2;
+        ctx.beginPath();
+        points.forEach((p, i) => i ? ctx.lineTo(p.x*s, p.y*s)
+                                   : ctx.moveTo(p.x*s, p.y*s));
+        ctx.closePath(); ctx.stroke();
+        ctx.fillStyle = 'yellow';
+        gridPts.forEach(g => { ctx.beginPath();
+          ctx.arc(g.x * s, g.y * s, 3, 0, 2 * Math.PI); ctx.fill(); });
+      }
+    }
+
+    function drawAmbilightRects(data) {
+      const s = scale();
+      [['top'],['bottom'],['left'],['right']].forEach(([side]) => {
+        const colors = data[side] || [], rects = data[side+'Rects'] || [];
+        for (let i = 0; i < colors.length && i < rects.length; i++) {
+          const [r, g, b] = colors[i], q = rects[i];
+          const x1 = q.x1*s, y1 = q.y1*s, x2 = q.x2*s, y2 = q.y2*s;
+          const f = brightnessPct / 100;   // what the Leuchter gets
+          ctx.fillStyle = `rgb(${Math.round(r*f)}, ${Math.round(g*f)}, ${Math.round(b*f)})`;
+          ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
+          ctx.strokeStyle = 'rgba(0,255,0,0.5)'; ctx.lineWidth = 1;
+          ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+        }
+      });
+    }
+
+    function fetchAmbilightData() {
+      fetch('/api/ambilight')
+        .then(r => r.text()).then(t => { const d = JSON.parse(t);
+          if (!d.error) {
+            ambilightData = d;
+            if (d.frameSize) frameSize = d.frameSize;
+            drawPoints();
+          }})
+        .catch(console.error);
+    }
+    setInterval(fetchAmbilightData, 2000);
+    fetchAmbilightData();
+
+    function pushBrightness(value) {
+      brightnessPct = Math.max(0, Math.min(100, Math.round(value)));
+      brightVal.textContent = brightnessPct + ' %';
+      fetch('/api/brightness', { method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ value: brightnessPct }) })
+        .then(r => r.json()).then(console.log).catch(console.error);
+      drawPoints();
+    }
+    brightInput.addEventListener('input',
+      e => pushBrightness(brightInput.value));
+
+    document.getElementById('stream-container').addEventListener('click', e => {
+      if (points.length >= 4) return;
+      const rect = overlay.getBoundingClientRect();
+      // canvas -> frame space
+      const fx = (e.clientX - rect.left) / scale();
+      const fy = (e.clientY - rect.top) / scale();
+      points.push({ x: fx, y: fy });
+      const li = document.createElement('li');
+      li.textContent = `(${Math.round(fx)}, ${Math.round(fy)}) frame` ;
+      coordList.appendChild(li);
+      drawPoints();
+      if (points.length === 4) {
+        const payload = { points,
+          hSeg: parseInt(document.getElementById('hSeg').value) || 40,
+          vSeg: parseInt(document.getElementById('vSeg').value) || 26 };
+        fetch('/api/grid', { method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(payload) })
+          .then(r=>r.json()).then(d => { gridPts = d.points; drawPoints(); })
+          .catch(console.error);
+        fetch('/api/config', { method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(payload) })
+          .then(r=>r.json()).then(console.log).catch(console.error);
+      }
+    });
+
+    resetBtn.addEventListener('click', () => {
+      points = []; gridPts = []; ambilightData = null;
+      coordList.innerHTML = ''; drawPoints();
+    });
+    ambilightBtn.addEventListener('click', fetchAmbilightData);
+  </script>
+</body>
+</html>
+"""
+
+
+def load_state():
+    """Restore points/segments/brightness from state.json (if present)."""
+    try:
+        with open("state.json") as f:
+            saved = json.load(f)
+        cfg = STATE["config"]
+        cfg.update({k: v for k, v in saved.items() if k in cfg})
+        if cfg["points"]:
+            cfg["points"] = [tuple(p) for p in cfg["points"]]
+        if "brightness" in saved:
+            SENDER.set_brightness(saved["brightness"])
+        print("state.json loaded")
+    except FileNotFoundError:
+        pass
+
+
+def save_state():
+    with LOCK:
+        cfg = {k: STATE["config"][k] for k in ("points", "hSeg", "vSeg")}
+    cfg["brightness"] = SENDER.brightness
+    try:
+        with open("state.json", "w") as f:
+            json.dump(cfg, f)
+    except OSError:
+        pass
+
+
+def main():
+    import argparse
+    ap = argparse.ArgumentParser(description="sucher3 daemon")
+    ap.add_argument("--source", choices=["ptp", "synth", "off"],
+                    default="ptp")
+    ap.add_argument("--leuchter", default=None,
+                    help="target IP (default 192.168.0.107)")
+    ap.add_argument("--udp-port", type=int, default=None)
+    ap.add_argument("--http-port", type=int, default=8080)
+    ap.add_argument("--fps", type=float, default=2.0,
+                    help="grab/compute/send rate (PTP: 0.5-2 realistic)")
+    args = ap.parse_args()
+
+    global SENDER  # the HTTP handlers reference the single sender
+    SENDER = HyperionSender(leuchter_ip=args.leuchter
+                            or DEFAULTS["leuchter_ip"],
+                            port=args.udp_port or DEFAULTS["udp_port"],
+                            max_leds=DEFAULTS["max_leds"])
+
+    load_state()
+
+    source = {"ptp": Gphoto2Grabber(),
+              "synth": SyntheticGrabber(),
+              "off": None}[args.source]
+    print(f"[main] source={args.source} "
+          f"leuchter={SENDER.leuchter_ip}:{SENDER.port} "
+          f"http=:{args.http_port}")
+
+    if source is not None:
+        threading.Thread(target=lambda: ComputeLoop(source).run(args.fps),
+                         name="compute").start()
+
+    srv = ThreadingHTTPServer(("0.0.0.0", args.http_port),
+                              AmbilightStateHandler)
+    print(f"[main] open http://<pi-ip>:{args.http_port}/ in the browser")
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
