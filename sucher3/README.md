@@ -40,6 +40,22 @@ stripe), brightness slider 0–100 % (0 = off) → `POST /api/brightness`,
 plus `GET /api/ambilight`, `/api/stats` (uptime + UDP sent/acked/failed +
 brightness). Points, segments and brightness persist to `state.json`.
 
+### Send policy (new in sucher3)
+- **Mode switch** (UI checkbox / `POST /api/mode {"mode":"event"|"time"}`):
+  - `event` (default): one UDP packet per new camera picture. No fps, no
+    fade — the packet rate equals the camera rate.
+  - `time`: packets are emitted at **Send-FPS** independent of the camera
+    (UI slider 0.2–5 → `POST /api/sendfps {"value":F}`); each new camera
+    measurement only updates the color *target*.
+- **Fade slider 0–10** (`POST /api/fade {"value":N}`): in time mode the
+  transition from the last sent colors to a new measurement is spread
+  linearly over N packets (0 = jump immediately with next packet). A new
+  measurement during a fade restarts the fade from the current
+  interpolated color.
+- **Camera fps** is measured (exp. moving average over successful grabs)
+  and shown in the UI status line + reported by `/api/stats` as
+  `cameraFps` (plus `sendFps`, `fadeFrames`, `mode`).
+
 ## A80 / PTP notes
 - The A80 has **no video stream**: each live frame is one PTP transfer.
   `--samplecapture` (fast, low-res JPEG) is the intended source; the

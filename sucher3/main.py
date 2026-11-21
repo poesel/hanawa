@@ -38,6 +38,13 @@ DEFAULTS = {
     "hSeg": 40,                # 128-LED stripe: 40 top + 40 bottom
     "vSeg": 26,                # 24 + 24 on the sides
     "brightness": 100,         # percent, 0 = off
+    "sendFps": 1.0,            # time-mode: UDP packets per second (any rate
+                               # the camera delivers is decoupled from this)
+    "fadeFrames": 0,           # time-mode: fade from last sent colors to the
+                               # newly measured ones over this many packets
+                               # (0 = jump immediately, 10 = 10 packets)
+    "mode": "event",           # "event": one packet per new camera frame
+                               # "time": packets at sendFps + fading active
 }
 
 STATE = {
@@ -46,6 +53,8 @@ STATE = {
     "jpeg": None,              # last frame as JPEG bytes (for /api/snapshot)
     "frame_size": None,        # (w, h) of the last frame
     "started": time.time(),
+    "cam_fps": None,           # exp. moving average of the camera grab rate
+    "cam_last": None,          # time of the previous successfully grabbed frame
 }
 LOCK = threading.Lock()
 
@@ -72,9 +81,15 @@ class AmbilightStateHandler(SimpleHTTPRequestHandler):
         elif route == "/api/stats":
             with LOCK:
                 sender = SENDER
+                cfg = STATE["config"]
+                cam = STATE["cam_fps"]
             self.send_json(200, {
                 "uptimeMs": int((time.time() - STATE["started"]) * 1000),
                 "udp": dict(sender.stats() if sender else {}),
+                "cameraFps": round(cam, 2) if cam else None,
+                "sendFps": cfg["sendFps"],
+                "fadeFrames": cfg["fadeFrames"],
+                "mode": cfg["mode"],
             })
         else:
             self.send_error(404)
@@ -97,6 +112,35 @@ class AmbilightStateHandler(SimpleHTTPRequestHandler):
             save_state()
             self.send_json(200, {"status": "ok",
                                  "brightness": SENDER.brightness})
+        elif route == "/api/sendfps":
+            v = parse_number(body)
+            if v is None or not (0.05 <= v <= 30.0):
+                self.send_json(400, {"error": "sendFps needs 0.05..30"})
+            else:
+                with LOCK:
+                    STATE["config"]["sendFps"] = v
+                save_state()
+                self.send_json(200, {"status": "ok", "sendFps": v})
+        elif route == "/api/fade":
+            v = parse_value(body)
+            if v is None or not (0 <= v <= 10):
+                self.send_json(400, {"error": "fade needs int 0..10"})
+            else:
+                with LOCK:
+                    STATE["config"]["fadeFrames"] = v
+                save_state()
+                self.send_json(200, {"status": "ok",
+                                     "fadeFrames": v})
+        elif route == "/api/mode":
+            m = (body.get("mode") or body.get("value")
+                 if isinstance(body, dict) else body)
+            if m not in ("event", "time"):
+                self.send_json(400, {"error": 'mode: "event" or "time"'})
+            else:
+                with LOCK:
+                    STATE["config"]["mode"] = m
+                save_state()
+                self.send_json(200, {"status": "ok", "mode": m})
         else:
             self.send_error(404)
 
@@ -122,6 +166,15 @@ class AmbilightStateHandler(SimpleHTTPRequestHandler):
             return json.loads(raw)
         except Exception:
             return raw.decode(errors="ignore")
+
+
+def parse_number(body):
+    """float from {"value":X} or a bare number string (for sendFps)."""
+    v = body.get("value") if isinstance(body, dict) else body
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def parse_value(body):
@@ -190,6 +243,49 @@ def grid_response(body):
 SENDER = HyperionSender()  # (re)created in main() with the CLI args
 
 
+class ColorFader:
+    """time-mode sending: the packet stream interpolates linearly from the
+    last SENT colors toward the latest MEASURED target over fadeFrames
+    packets (0 = jump to new values with the next packet)."""
+
+    def __init__(self):
+        self.sent = None     # colors of the last packet actually sent
+        self.start = None    # fade start snapshot
+        self.target = None   # latest measured colors
+        self.step = 0
+        self.fade = 0
+
+    def set_target(self, colors, steps):
+        """new measurement arrived -> restart the fade from wherever we are"""
+        self.target = list(colors)
+        self.start = list(self.sent) if self.sent else list(colors)
+        self.step = 0
+        self.fade = max(0, min(10, int(steps)))
+
+    def next_packet(self):
+        """advance one packet, return the interpolated colors (or None)."""
+        if self.target is None:
+            return None
+        if self.fade <= 0:
+            self.sent = list(self.target)
+        else:
+            self.step = min(self.step + 1, self.fade)
+            t = self.step / self.fade
+            self.sent = [tuple(int(round(a + (b - a) * t))
+                               for a, b in zip(s, g))
+                         for s, g in zip(self.start, self.target)]
+        return self.sent
+
+    def snap(self, colors):
+        """event-mode: remember what was sent last, for a clean mode switch."""
+        self.sent = list(colors)
+        if self.target is None:
+            self.target = list(colors)
+
+
+FADER = ColorFader()
+
+
 class ComputeLoop:
     """Grabs frames, computes colors, sends UDP frames - like the sketch's
     loop() with calculateAmbilightContinuous() every 100 ms."""
@@ -215,6 +311,16 @@ class ComputeLoop:
         if frame is None:
             return
         w, h = frame.size
+        # camera fps: exp. moving average over successful grabs
+        now = time.time()
+        with LOCK:
+            if STATE["cam_last"]:
+                dt = now - STATE["cam_last"]
+                if dt > 0:
+                    inst = 1.0 / dt
+                    STATE["cam_fps"] = (0.7 * STATE["cam_fps"] + 0.3 * inst
+                                        if STATE["cam_fps"] else inst)
+            STATE["cam_last"] = now
         # sucher2 point order: [topLeft, topRight, botRight, botLeft]
         tl, tr, br, bl = cfg["points"]
         top, bottom, left, right = calculate_ambilight_windows(
@@ -227,8 +333,15 @@ class ComputeLoop:
         # packing for the stripe: LED 0 at top right, clockwise
         colors = (list(rightc) + list(reversed(bottomc))
                   + list(reversed(leftc)) + list(topc))
-        SENDER.send_frame(colors)
-        SENDER.poll_ack()
+
+        # event mode: one packet per new camera frame, no fade/no fps policy
+        # time mode: only remember the target -> sender_loop emits packets
+        if cfg["mode"] == "event":
+            SENDER.send_frame(colors)
+            SENDER.poll_ack()
+            FADER.snap(colors)
+        else:
+            FADER.set_target(colors, cfg["fadeFrames"])
 
         with LOCK:
             STATE["jpeg"] = jpeg
@@ -245,6 +358,24 @@ class ComputeLoop:
             }
 
 
+def sender_loop():
+    """time-mode: emit UDP packets at sendFps, fully decoupled from the
+    camera rate. In event mode this does nothing."""
+    while True:
+        t0 = time.time()
+        try:
+            if STATE["config"]["mode"] == "time":
+                colors = FADER.next_packet()
+                if colors:
+                    SENDER.send_frame(colors)
+                    SENDER.poll_ack()
+        except Exception as e:  # never kill the loop
+            print(f"[sender] {e}")
+        dt = time.time() - t0
+        rate = STATE["config"]["sendFps"] or 1.0
+        time.sleep(max(0.0, 1.0 / rate - dt))
+
+
 INDEX_HTML = r"""<!DOCTYPE html>
 <html>
 <head>
@@ -258,7 +389,8 @@ INDEX_HTML = r"""<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <h1>sucher3 Live View (Canon PowerShot A80, PTP) - v1</h1>
+  <h1>sucher3 Live View (Canon PowerShot A80, PTP) - v2</h1>
+  <div id="camstats" style="font:12px monospace; margin-top:4px;">cam fps: – | mode: event | send: 1 fps | fade: 0</div>
   <div id="stream-container">
     <img id="stream" width="640" height="480"/>
     <canvas id="overlay" width="640" height="480"></canvas>
@@ -281,6 +413,23 @@ INDEX_HTML = r"""<!DOCTYPE html>
                step="5" style="width:120px;">
       </label>
       <span id="brightVal">100 %</span>
+      <br/>
+      <label>Send-FPS (Time-Mode):
+        <input type="range" id="sendfps" min="0.2" max="5" value="1"
+               step="0.1" style="width:120px;">
+      </label>
+      <span id="sendFpsVal">1 fps</span>
+      <br/>
+      <label>Fade (Packages):
+        <input type="range" id="fade" min="0" max="10" value="0"
+               step="1" style="width:120px;">
+      </label>
+      <span id="fadeVal">0</span>
+      <br/>
+      <label>Time-Mode?
+        <input type="checkbox" id="modeTime">
+      </label>
+      <span id="modeVal">Event-Mode</span>
     </div>
 
     <button id="reset" style="margin-top:10px;">Punkte zurückseet</button>
@@ -412,6 +561,48 @@ INDEX_HTML = r"""<!DOCTYPE html>
       coordList.innerHTML = ''; drawPoints();
     });
     ambilightBtn.addEventListener('click', fetchAmbilightData);
+
+    // ---- cam-fps display + send policy (fps / fade / mode) --------------
+    const camStats = document.getElementById('camstats');
+    function fetchStats() {
+      fetch('/api/stats').then(r => r.json()).then(d => {
+        camStats.textContent =
+          `cam fps: ${d.cameraFps ?? '-'} | mode: ${d.mode} | send: ${d.sendFps} fps | fade: ${d.fadeFrames} pkg`;
+      }).catch(console.error);
+    }
+    setInterval(fetchStats, 2000);
+    fetchStats();
+
+    function pushSendFps(value) {
+      fetch('/api/sendfps', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: parseFloat(value) }) })
+        .then(r => r.json()).then(console.log).catch(console.error);
+    }
+    const sendfpsInput = document.getElementById('sendfps');
+    sendfpsInput.addEventListener('input',
+      e => pushSendFps(sendfpsInput.value));
+
+    function pushFade(value) {
+      fetch('/api/fade', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: parseInt(value) }) })
+        .then(r => r.json()).then(console.log).catch(console.error);
+    }
+    const fadeInput = document.getElementById('fade');
+    fadeInput.addEventListener('input',
+      e => pushFade(fadeInput.value));
+
+    function pushMode(on) {
+      const m = on ? 'time' : 'event';
+      fetch('/api/mode', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: m }) })
+        .then(r => r.json()).then(console.log).catch(console.error);
+    }
+    const modeChk = document.getElementById('modeTime');
+    modeChk.addEventListener('click',
+      () => pushMode(modeChk.checked));
   </script>
 </body>
 </html>
@@ -436,7 +627,8 @@ def load_state():
 
 def save_state():
     with LOCK:
-        cfg = {k: STATE["config"][k] for k in ("points", "hSeg", "vSeg")}
+        cfg = {k: STATE["config"][k] for k in ("points", "hSeg", "vSeg",
+                "sendFps", "fadeFrames", "mode")}
     cfg["brightness"] = SENDER.brightness
     try:
         with open("state.json", "w") as f:
@@ -476,6 +668,7 @@ def main():
     if source is not None:
         threading.Thread(target=lambda: ComputeLoop(source).run(args.fps),
                          name="compute").start()
+    threading.Thread(target=sender_loop, name="sender").start()
 
     srv = ThreadingHTTPServer(("0.0.0.0", args.http_port),
                               AmbilightStateHandler)
