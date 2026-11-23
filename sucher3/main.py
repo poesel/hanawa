@@ -461,7 +461,6 @@ INDEX_HTML = r"""<!DOCTYPE html>
     const resetBtn = document.getElementById('reset');
     const ambilightBtn = document.getElementById('ambilight');
     const brightInput = document.getElementById('bright');
-    const brightVal = document.getElementById('brightVal');
 
     let points = [];      // FRAME space
     let gridPts = [];     // FRAME space
