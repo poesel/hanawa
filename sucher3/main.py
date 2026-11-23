@@ -337,8 +337,6 @@ class ComputeLoop:
 
     def poll_once(self):
         cfg = STATE["config"]
-        if not cfg["points"]:
-            return  # no window configured -> nothing to compute
         frame = self.source.grab()   # RGB ndarray (H,W,3) or None
         if frame is None:
             return
@@ -353,6 +351,15 @@ class ComputeLoop:
                     STATE["cam_fps"] = (0.7 * STATE["cam_fps"] + 0.3 * inst
                                         if STATE["cam_fps"] else inst)
             STATE["cam_last"] = now
+        # frames are kept for the browser preview even without a window
+        # configured (so the UI can show the picture while you click the
+        # 4 corners); only the color computation/packets need the points
+        if not cfg["points"]:
+            with LOCK:
+                STATE["jpeg"] = None     # snapshot re-encoded on demand
+                STATE["frame"] = frame
+                STATE["frame_size"] = (w, h)
+            return
         # sucher2 point order: [topLeft, topRight, botRight, botLeft]
         tl, tr, br, bl = cfg["points"]
         top, bottom, left, right = calculate_ambilight_windows(
