@@ -20,6 +20,7 @@ Usage:
 """
 import json
 import socket
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -29,7 +30,7 @@ from io import BytesIO
 
 from windows import (calculate_ambilight_windows, sample_colors)
 from sender import HyperionSender
-from grabber import WebcamGrabber, Gphoto2Grabber, SyntheticGrabber, frame_from_jpeg
+from grabber import WebcamGrabber, Gphoto2Grabber, SyntheticGrabber
 
 DEFAULTS = {
     "leuchter_ip": "192.168.0.107",
@@ -51,7 +52,8 @@ DEFAULTS = {
 STATE = {
     "config": dict(DEFAULTS),
     "result": None,            # dict of the last computed ambilight JSON
-    "jpeg": None,              # last frame as JPEG bytes (for /api/snapshot)
+    "jpeg": None,              # lazily encoded snapshot for /api/snapshot
+    "frame": None,             # last frame as RGB ndarray (H,W,3)
     "frame_size": None,        # (w, h) of the last frame
     "started": time.time(),
     "cam_fps": None,           # exp. moving average of the camera grab rate
@@ -69,8 +71,7 @@ class AmbilightStateHandler(SimpleHTTPRequestHandler):
             self.send_bytes(200, "text/html; charset=utf-8",
                             INDEX_HTML.encode())
         elif route == "/api/snapshot":
-            with LOCK:
-                jpg = STATE["jpeg"]
+            jpg = ensure_snapshot_jpeg()
             if jpg:
                 self.send_bytes(200, "image/jpeg", jpg)
             else:
@@ -167,6 +168,39 @@ class AmbilightStateHandler(SimpleHTTPRequestHandler):
             return json.loads(raw)
         except Exception:
             return raw.decode(errors="ignore")
+
+
+def ensure_snapshot_jpeg():
+    """Encode the cached RGB ndarray as JPEG *only on request*: imencode
+    costs seconds per frame on Pi-1-class hardware, so it must never run
+    in the grab loop. Result is cached until the next frame replaces it."""
+    with LOCK:
+        jpg = STATE["jpeg"]
+        frame = STATE["frame"]
+    if jpg:
+        return jpg
+    if frame is None:
+        return None
+    try:
+        import cv2
+        small = (frame if frame.shape[1] == 320 else
+                 cv2.resize(frame, (320, 240), interpolation=cv2.INTER_AREA))
+        ok, buf = cv2.imencode(".jpg", small[:, :, ::-1],   # RGB -> BGR
+                               [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+        if not ok:
+            return None
+        data = buf.tobytes()
+    except (ImportError, AttributeError, TypeError):
+        from PIL import Image
+        img = Image.fromarray(frame)
+        if img.size != (320, 240):
+            img = img.resize((320, 240))
+        out = BytesIO()
+        img.save(out, "JPEG", quality=70)
+        data = out.getvalue()
+    with LOCK:
+        STATE["jpeg"] = data
+    return data
 
 
 def parse_number(body):
@@ -305,13 +339,10 @@ class ComputeLoop:
         cfg = STATE["config"]
         if not cfg["points"]:
             return  # no window configured -> nothing to compute
-        jpeg = self.source.grab()
-        if jpeg is None:
-            return
-        frame = frame_from_jpeg(jpeg)
+        frame = self.source.grab()   # RGB ndarray (H,W,3) or None
         if frame is None:
             return
-        w, h = frame.size
+        h, w = frame.shape[:2]
         # camera fps: exp. moving average over successful grabs
         now = time.time()
         with LOCK:
@@ -345,7 +376,8 @@ class ComputeLoop:
             FADER.set_target(colors, cfg["fadeFrames"])
 
         with LOCK:
-            STATE["jpeg"] = jpeg
+            STATE["jpeg"] = None    # snapshot re-encoded on demand
+            STATE["frame"] = frame
             STATE["frame_size"] = (w, h)
             STATE["result"] = {
                 "timestamp": int(time.time() * 1000),
@@ -647,6 +679,10 @@ def main():
                          "(broken, kept for reference)")
     ap.add_argument("--device", default="/dev/video0",
                     help="V4L2 device for the webcam")
+    ap.add_argument("--set-ctrl", default="",
+                    help="one-time v4l2-ctl -c <ctrls> at startup, e.g. "
+                         "\"gain_automatic=0,brightness=200\" to fight dark "
+                         "scenes; default: untouched")
     ap.add_argument("--leuchter", default=None,
                     help="target IP (default 192.168.0.107)")
     ap.add_argument("--udp-port", type=int, default=None)
@@ -663,6 +699,15 @@ def main():
                             max_leds=DEFAULTS["max_leds"])
 
     load_state()
+
+    if args.set_ctrl:
+        try:
+            subprocess.run(["v4l2-ctl", f"--device={args.device}",
+                            "-c", args.set_ctrl], capture_output=True,
+                            timeout=5)
+            print(f"[main] v4l2-ctl -c {args.set_ctrl} applied")
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            print("[main] v4l2-ctl not usable, --set-ctrl skipped")
 
     source = {"webcam": WebcamGrabber(args.device),
               "ptp": Gphoto2Grabber(),

@@ -63,9 +63,11 @@ brightness). Points, segments and brightness persist to `state.json`.
   know the model: check `v4l2-ctl --list-devices` and its supported
   sizes with `v4l2-ctl --device=/dev/video0 --list-formats-ext`.
 - Backends auto-selected, first that works wins: **OpenCV**
-  (`cv2.VideoCapture`, persistent → true webcam fps, 10–30 fps), then
-  `v4l2-ctl --to-jpg`, then `ffmpeg -f v4l2` (per-call processes,
-  slower but need no Python OpenCV build).
+  (`cv2.VideoCapture`, persistent → true webcam fps), v4l2-ctl
+  `--capture-mjpeg` stream, per-call `v4l2-ctl --to-jpg`, `ffmpeg -f
+  v4l2`. On the Pi below, OpenCV was the one that worked (it also
+  handles the gspca compressed-JPEG pipeline here); the Pi's `v4l2-ctl`
+  has no capture options and `ffmpeg -f v4l2` fails on this cam.
 - Grab rate (`--fps`, default 4) is the *camera* rate; the packet rate
   to the Leuchter is the `sendFps` slider in time mode.
 - The ack trick: the Leuchter sends `0x80` back to the sender IP on
@@ -73,7 +75,27 @@ brightness). Points, segments and brightness persist to `state.json`.
   same socket sends *and* receives.
 - Pi must sit on the same WLAN LAN (target `192.168.0.107:1900`).
 
+## Verified hardware (2026-11, Pi @192.168.0.101 + Logitech QuickCam)
+- Pi: Raspbian 13 (trixie), armv6l Pi-1-class, 427 MB RAM. `python3-opencv`
+  + `python3-pil` + ffmpeg installed; user must be in the `video` group
+  (`sudo usermod -aG video <user>`, log in after).
+- Webcam: `046d:08ae` QuickCam for Notebooks, driver `gspca_zc3xx`,
+  `/dev/video0`, capture is **compressed JPEG only** at 320×240 /
+  640×480. OpenCV decodes it and grabs 640×480 natively.
+- Frames flow as **RGB numpy arrays** end to end — never re-encode JPEG
+  per frame on this machine (`imencode` costs seconds; the camera does
+  ~20 fps). `/api/snapshot` JPEG-encodes lazily on request only.
+- Startup takes ~5 s (numpy/cv2 import on Pi1). **Cold-start first
+  frame can take ~45 s**: the cam has no exposure control and its
+  auto-exposure settles slowly in a dark room; afterwards grabs run at
+  17–20 fps (the UI/`--fps` throttles to 4). With the TV on the scene
+  is lit and the first frame is quick. HTTP GETs may take seconds while
+  the sampling thread saturates the Pi1 CPU — that is normal.
+- Live run: `--source webcam`, config 40×26 → `sent` climbs 1:1 per
+  grabbed frame (event mode), `failed 0`, `acked 0` while the Leuchter
+  is off. `cameraFps: 4.0` in `/api/stats` once a frame landed.
+
 ## Status
-Webcam model not given yet — the pipeline is hardware-ready and fully
-tested with `--source synth`; run `grabtest.py` when the webcam is
-connected to confirm device, backend and frame size.
+Fully verified on the Pi with the QuickCam: grabs at 4 fps (throttled),
+128-LED windows, UDP `sent` climbing, UI served. Fade/event modes and
+brightness against the Leuchter still pending once it is powered again.

@@ -8,9 +8,10 @@ Differences to the C++ sketch:
     frame's native pixel space, so config points, rects and sampling all
     live in the SAME coordinate space (the frame size reported in
     /api/ambilight "frameSize").
-  - pixels come from Pillow as RGB(A), not RGB565.
+  - pixels come from the grabbers as RGB numpy arrays, not RGB565.
 """
 import math
+import numpy as np
 
 
 def constrain(v, lo, hi):
@@ -78,7 +79,8 @@ def calculate_ambilight_windows(top_left, top_right, bot_left, bot_right,
 
 def calculate_mean_rgb(px, width, height, x1, y1, x2, y2, step=2):
     """RMS-mean over the rect, sampling every `step`-th pixel - identical
-    to calculateMeanRGB in windows.cpp. `px` is a Pillow Image (RGB)."""
+    math to calculateMeanRGB in windows.cpp, vectorized with numpy.
+    `px` is an RGB ndarray (H,W,3)."""
     x1 = constrain(int(x1), 0, width - 1)
     x2 = constrain(int(x2), 0, width - 1)
     y1 = constrain(int(y1), 0, height - 1)
@@ -86,22 +88,15 @@ def calculate_mean_rgb(px, width, height, x1, y1, x2, y2, step=2):
     if x1 >= x2 or y1 >= y2:
         return (0, 0, 0)
 
-    sum_r = sum_g = sum_b = 0
-    n = 0
-    load = px.load()
-    for y in range(y1, y2, step):
-        for x in range(x1, x2, step):
-            r, g, b = load[x, y][:3]
-            sum_r += r * r
-            sum_g += g * g
-            sum_b += b * b
-            n += 1
+    sub = px[y1:y2:step, x1:x2:step]
+    n = sub.shape[0] * sub.shape[1]
     if n == 0:
         return (128, 128, 128)
+    ssq = (sub.astype(np.int64) ** 2).sum(axis=(0, 1))
     # "step-Korrektur" exactly like the sketch: sqrt(step^2 * sum / n)
     k = step * step
-    return tuple(min(255, int(math.sqrt(k * s / n) + 0.5))
-                 for s in (sum_r, sum_g, sum_b))
+    return tuple(min(255, int(math.sqrt(k * int(s) / n) + 0.5))
+                 for s in ssq)
 
 
 def sample_colors(px, width, height, rects):

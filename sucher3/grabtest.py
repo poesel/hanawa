@@ -42,12 +42,17 @@ def show(title, res):
 
 
 def report_frame(what, data):
+    if data is None:
+        return False
+    if hasattr(data, "shape"):
+        print(f"  {what}: ndarray {data.shape} HxWxC")
+        return True
     if not data:
         return False
     im = frame_from_jpeg(data)
     if im is None:
         return False
-    print(f"  {what}: {len(data)} bytes, size {im.size}")
+    print(f"  {what}: {len(data)} bytes, size {(im.shape[1], im.shape[0])}")
     return True
 
 
@@ -88,10 +93,10 @@ if __name__ == "__main__":
             ok = 0
             first = None
             for i in range(10):
-                d = g.grab()
-                if d:
+                d = g.grab()          # cv2 backend preferred
+                if d is not None:
                     ok += 1
-                    first = first or d
+                    first = first if first is not None else d
             dt = time.time() - t0
             print(f"  cv2: {ok}/10 frames in {dt:.1f}s "
                   f"-> {ok / dt:.1f} fps (backend {'cv2' if ok else '-'})")
@@ -100,14 +105,28 @@ if __name__ == "__main__":
                 sys.exit(0)
         else:
             print("  no OpenCV -> try: sudo apt install python3-opencv")
-        # backends 2+3 with timing
+        # backends with timing: persistent stream, then per-call grabs
         g = WebcamGrabber(device)
+        t0 = time.time()
+        ok = 0
+        first = None
+        for i in range(10):
+            d = g.grab_stream(timeout=5)
+            if d is not None:
+                ok += 1
+                first = first if first is not None else d
+        dt = time.time() - t0
+        print(f"  v4l2-ctl mjpeg stream: {ok}/10 frames in {dt:.1f}s "
+              f"-> {ok / dt:.1f} fps")
+        report_frame("stream frame", first)
         for name in ("v4l2", "ffmpeg"):
-            g.backend = name if False else g.backend
-            t0 = time.time()
-            d = (g.grab_v4l2() if name == "v4l2" else g.grab_ffmpeg())
-            dt = time.time() - t0
-            print(f"  {name}: {'OK' if d else 'FAIL'} "
-                  f"({dt:.2f}s/frame)")
-            report_frame(name, d)
+            try:
+                t0 = time.time()
+                d = (g.grab_v4l2() if name == "v4l2" else g.grab_ffmpeg())
+                dt = time.time() - t0
+                print(f"  {name}: {'OK' if d else 'FAIL'} "
+                      f"({dt:.2f}s/frame)")
+                report_frame(name, d)
+            except Exception as e:
+                print(f"  {name}: FAIL ({type(e).__name__})")
         print("\nmain.py auto-uses the first backend that works.")
