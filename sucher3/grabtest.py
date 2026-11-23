@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""sucher3 - PTP Probe for the Canon PowerShot A80.
+"""sucher3 - Probe for the frame source.
 
-Run this ON THE PI once the camera is plugged in (usb-file / libgphoto2
-installed). It answers the three things we need to know about the camera:
-  1. is it detected at all (PTP class 07)?
-  2. which capture modes does it offer (sample = fast preview JPEG)?
-  3. what size/format does a grabbed frame have, and how long does one
-     frame take over the slow USB 1.1 pipe?
+Default: webcam (V4L2). Run ON THE PI once the webcam is plugged in.
+Answers:  is there a /dev/videoN?  which backend grabs?  how long does
+one frame take and what is its size?
+
+  python3 grabtest.py                 # webcam at /dev/video0
+  python3 grabtest.py --device /dev/video2
+  python3 grabtest.py --ptp           # old Canon A80 probe (dead cam)
 """
+import glob
 import shutil
 import subprocess
 import time
+
+from grabber import WebcamGrabber, frame_from_jpeg
 
 
 def run(args, timeout=30):
@@ -27,38 +31,83 @@ def show(title, res):
     print("=" * 60)
     print(title)
     if res is None:
-        print("  gphoto2 not installed -> sudo apt install gphoto2")
+        print("  tool not installed")
         return
     code, out, err = res
     print("  exit:", code)
-    print("  stderr:", err.strip()[:600])
-    if out[:2] == b"\xff\xd8":
-        try:
-            from PIL import Image
-            import io
-            im = Image.open(io.BytesIO(out))
-            print("  JPEG frame:", im.size, len(out), "bytes")
-        except Exception as e:
-            print("  JPEG decode failed:", e)
-    elif out:
+    if err.strip():
+        print("  stderr:", err.strip()[:600])
+    if out:
         print("  stdout:", out.decode(errors="ignore")[:600])
 
 
+def report_frame(what, data):
+    if not data:
+        return False
+    im = frame_from_jpeg(data)
+    if im is None:
+        return False
+    print(f"  {what}: {len(data)} bytes, size {im.size}")
+    return True
+
+
 if __name__ == "__main__":
-    show("camera detection", run(["gphoto2", "--list-cameras"], timeout=15))
-    show("camera found? (--auto-detect)", run(["gphoto2", "--auto-detect"],
-                                              timeout=15))
-    show("abilities (sample capture support?)",
-         run(["gphoto2", "--abilities"], timeout=15))
-    for name, args in (("samplecapture", ["gphoto2", "--samplecapture",
-                                          "1", "--filename", "-"]),
-                       ("capture-sample", ["gphoto2", "--capture-sample",
-                                          "--filename", "-"])):
-        t0 = time.time()
-        res = run(args, timeout=60)
-        dt = time.time() - t0
-        show(f"{name} -> time {dt:.1f}s", res)
-        if res and res[1][:2] == b"\xff\xd8":
-            break
-    print("\nIf sample capture works, use it: one JPEG per ~1-3 s over USB "
-          "1.1 is plenty for 128 color windows.")
+    import sys
+    args = sys.argv[1:]
+    device = "/dev/video0"
+    if "--device" in args:
+        device = args[args.index("--device") + 1]
+
+    if "--ptp" in args:
+        show("camera detection", run(["gphoto2", "--auto-detect"], 15))
+        show("abilities", run(["gphoto2", "--abilities"], 15))
+        for name, cmd in (("samplecapture",
+                           ["gphoto2", "--samplecapture", "1",
+                            "--filename", "-"]),
+                          ("capture-sample",
+                           ["gphoto2", "--capture-sample",
+                            "--filename", "-"])):
+            t0 = time.time()
+            res = run(cmd, 60)
+            dt = time.time() - t0
+            show(f"{name} -> time {dt:.1f}s", res)
+            if res and report_frame(name, res[1]):
+                break
+    else:
+        print("V4L2 devices:", glob.glob("/dev/video*"))
+        show("v4l2 tools?", run(["v4l2-ctl", "--list-devices"], 15))
+        # backend 1: OpenCV persistent capture, measure 10 frames
+        try:
+            import cv2  # noqa
+            have_cv2 = True
+        except ImportError:
+            have_cv2 = False
+        if have_cv2:
+            g = WebcamGrabber(device)
+            t0 = time.time()
+            ok = 0
+            first = None
+            for i in range(10):
+                d = g.grab()
+                if d:
+                    ok += 1
+                    first = first or d
+            dt = time.time() - t0
+            print(f"  cv2: {ok}/10 frames in {dt:.1f}s "
+                  f"-> {ok / dt:.1f} fps (backend {'cv2' if ok else '-'})")
+            report_frame("first frame", first)
+            if ok:
+                sys.exit(0)
+        else:
+            print("  no OpenCV -> try: sudo apt install python3-opencv")
+        # backends 2+3 with timing
+        g = WebcamGrabber(device)
+        for name in ("v4l2", "ffmpeg"):
+            g.backend = name if False else g.backend
+            t0 = time.time()
+            d = (g.grab_v4l2() if name == "v4l2" else g.grab_ffmpeg())
+            dt = time.time() - t0
+            print(f"  {name}: {'OK' if d else 'FAIL'} "
+                  f"({dt:.2f}s/frame)")
+            report_frame(name, d)
+        print("\nmain.py auto-uses the first backend that works.")

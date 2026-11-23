@@ -1,26 +1,90 @@
 #!/usr/bin/env python3
-"""sucher3 - Frame-Source: Canon PowerShot A80 via USB (PTP, class 07).
+"""sucher3 - Frame-Source: Raspberry Pi webcam (V4L2/UVC, /dev/videoN).
 
-The A80 is a libgphoto2-supported classic (driver canon/utvdc "canusum"-
-line). It has no MJPEG stream: every live frame is ONE PTP transfer over
-the slow USB 1.1 pipe. Fastest preview of this camera: the camera's
-"sample capture" (small JPEG, ~160x120), which is exactly what we need
-for color sampling.
+Primary source since the Canon A80 died. Any model that shows up in
+`v4l2-compliance`/`ls /dev/video*` works; three backends are tried,
+first that works wins:
+  1. OpenCV  cv2.VideoCapture  (persistent, fastest, decodes BGR -> JPEG)
+  2. v4l2-ctl --to-jpg         (single frame per call)
+  3. ffmpeg -f v4l2            (single frame to stdout)
 
-Grab strategy (in order, first that works wins):
-  1. gphoto2 --samplecapture 1   (fast low-res JPEG, no shutter release)
-  2. gphoto2 --capture-sample
-  3. gphoto2 --capture-image-and-download (full res, slow - last resort)
-
-Run `sucher3/grabtest.py` on the Pi to see what the camera really
-supports once it is connected (prints size/format of one frame).
+The old Canon A80 PTP grabber is kept below as fallback/experiment.
 """
 import shutil
 import subprocess
 import time
 
 
+class WebcamGrabber:
+    """Default source: V4L2 webcam at /dev/videoN (UVC compatible models)."""
+
+    def __init__(self, device="/dev/video0"):
+        self.device = device
+        self.backend = None       # "cv2" | "v4l2" | "ffmpeg", sticky on success
+        self.cap = None           # persistent cv2 VideoCapture
+
+    def _try_cv2(self):
+        import cv2
+        if self.cap is None:
+            self.cap = cv2.VideoCapture(self.device)
+            if not self.cap.isOpened():
+                self.cap = None
+                return None
+        ret, frame = self.cap.read()   # BGR ndarray
+        if not ret:
+            return None
+        ok, buf = cv2.imencode(".jpg", frame)
+        return bytes(buf) if ok else None
+
+    def grab_v4l2(self):
+        out = subprocess.run(["v4l2-ctl", f"--device={self.device}",
+                              "--to-jpg", "/tmp/sucher3_frame.jpg"],
+                             capture_output=True, timeout=10)
+        if out.returncode != 0:
+            return None
+        with open("/tmp/sucher3_frame.jpg", "rb") as f:
+            return f.read()
+
+    def grab_ffmpeg(self):
+        out = subprocess.run(
+            ["ffmpeg", "-y", "-f", "v4l2", "-i", self.device,
+             "-frames:v", "1", "-f", "jpg", "-"],
+            capture_output=True, timeout=15)
+        return out.stdout if out.stdout[:2] == b"\xff\xd8" else None
+
+    def grab(self, timeout=30):
+        """Returns JPEG bytes or None. cv2 is tried first (persistent capture
+        object = real webcam fps, no per-call process overhead)."""
+        try:
+            data = self._try_cv2()
+            if data:
+                self.backend = "cv2"
+                return data
+        except ImportError:
+            pass
+        except Exception:
+            self.cap = None
+        if self.backend in (None, "v4l2"):
+            try:
+                data = self.grab_v4l2()
+                if data:
+                    self.backend = "v4l2"
+                    return data
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                pass
+        if self.backend in (None, "ffmpeg"):
+            try:
+                data = self.grab_ffmpeg()
+                if data:
+                    self.backend = "ffmpeg"
+                    return data
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+                pass
+        return None
+
+
 class Gphoto2Grabber:
+    # kept from the dead A80 experiment - selectable via --source ptp
     def __init__(self):
         self.tools = [
             ["gphoto2", "--samplecapture", "1", "--filename", "-"],

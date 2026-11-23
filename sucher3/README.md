@@ -1,14 +1,15 @@
 # sucher3 — Ambilight Sucher on a Raspberry Pi
 
 Same job as sucher2 (the ESP32-CAM sketch), but running on a
-**Raspberry Pi** which gets frames from a **Canon PowerShot A80** over
-USB (**PTP**, class 07 camera, USB 1.1 pipe). The Leuchter side is
-untouched.
+**Raspberry Pi** which gets frames from a **webcam** over **V4L2**
+(`/dev/videoN`, UVC). The Canon PowerShot A80 turned out broken and was
+scrapped — its PTP grabber is still in `grabber.py` as `--source ptp`
+for reference. The Leuchter side is untouched.
 
 ```
-Canon A80 --PTP/JPEG--> Pi (color sampling) --Hyperion UDP :1900--> Leuchter
-                                                    ^
-                        browser UI on the Pi (window config, brightness)
+webcam --V4L2/JPEG--> Pi (color sampling) --Hyperion UDP :1900--> Leuchter
+                                                ^
+                    browser UI on the Pi (window config, brightness, send policy)
 ```
 
 ## Files
@@ -17,21 +18,22 @@ Canon A80 --PTP/JPEG--> Pi (color sampling) --Hyperion UDP :1900--> Leuchter
 | `main.py` | daemon: compute-loop + HTTP server + embedded web UI |
 | `windows.py` | exact port of the sucher2 rect math + RMS color sampling |
 | `sender.py` | Hyperion UDP frames (`AA 00 FF <chk>` + RGB), brightness scaling, ack stats |
-| `grabber.py` | frame source: gphoto2 PTP grabber + synthetic test source |
-| `grabtest.py` | probe script for the A80 once it is plugged into the Pi |
+| `grabber.py` | frame source: V4L2 webcam grabber (cv2/v4l2-ctl/ffmpeg), PTP + synthetic sources |
+| `grabtest.py` | probe script for the webcam once it is plugged into the Pi |
 
 ## Coordinate space
-Everything works in the **frame's native pixel space** (the A80 sample
-capture is ~160×120 / preview bigger). `/api/ambilight` reports it as
+Everything works in the **frame's native pixel space** (webcam: usually
+640×480 or whatever `v4l2-ctl` reports). `/api/ambilight` reports it as
 `"frameSize": [w,h]`, the JS UI converts canvas↔frame with it. Unlike
 sucher2 there is no /2 halving (the Pi has the RAM for it).
 
 ## Running on the Pi
 ```bash
-sudo apt install gphoto2 python3-pillow   # or pip install Pillow
-python3 grabtest.py                       # once, camera plugged in: what works?
-python3 main.py                           # real: source=ptp
-python3 main.py --source synth            # dev without camera
+sudo apt install python3-opencv v4l-utils   # Pillow via python3-pillow usually built-in
+python3 grabtest.py                       # once, webcam plugged in: which backend, fps, size?
+python3 main.py                           # real: webcam on /dev/video0
+python3 main.py --device /dev/video2      # other webcam slot
+python3 main.py --source synth            # dev without webcam
 python3 main.py --leuchter 192.168.0.40   # sender test against a catcher
 ```
 Open `http://<pi-ip>:8080/` — same UI as sucher2: snapshot polling, click
@@ -56,21 +58,22 @@ brightness). Points, segments and brightness persist to `state.json`.
   and shown in the UI status line + reported by `/api/stats` as
   `cameraFps` (plus `sendFps`, `fadeFrames`, `mode`).
 
-## A80 / PTP notes
-- The A80 has **no video stream**: each live frame is one PTP transfer.
-  `--samplecapture` (fast, low-res JPEG) is the intended source; the
-  grabber falls back to `--capture-sample`, then full capture.
-- USB 1.1 is slow: expect ~0.3–2 fps, not 10. One JPEG per second is
-  plenty for the stripe (the Leuchter just holds the last frame).
+## Webcam / V4L2 notes
+- Works with any model the kernel shows as `/dev/videoN` (UVC). When you
+  know the model: check `v4l2-ctl --list-devices` and its supported
+  sizes with `v4l2-ctl --device=/dev/video0 --list-formats-ext`.
+- Backends auto-selected, first that works wins: **OpenCV**
+  (`cv2.VideoCapture`, persistent → true webcam fps, 10–30 fps), then
+  `v4l2-ctl --to-jpg`, then `ffmpeg -f v4l2` (per-call processes,
+  slower but need no Python OpenCV build).
+- Grab rate (`--fps`, default 4) is the *camera* rate; the packet rate
+  to the Leuchter is the `sendFps` slider in time mode.
 - The ack trick: the Leuchter sends `0x80` back to the sender IP on
   port 1900. `sender.py` binds its socket to local port 1900, so the
-  same socket sends *and* receives — no raw-socket hacks needed.
+  same socket sends *and* receives.
 - Pi must sit on the same WLAN LAN (target `192.168.0.107:1900`).
-- USB permission: add `SUBCENTS`/udev rule or just run with the stock
-  `usb-file` udev support of gphoto2 (class 07 PTP cameras work without
-  special rules on recent Raspberry Pi OS).
 
 ## Status
-Hardware not connected yet — the full pipeline can be run with
-`--source synth` and verified against a UDP catcher before the camera
-arrives.
+Webcam model not given yet — the pipeline is hardware-ready and fully
+tested with `--source synth`; run `grabtest.py` when the webcam is
+connected to confirm device, backend and frame size.

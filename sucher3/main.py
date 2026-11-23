@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""sucher3 - Ambilight Sucher for Raspberry Pi + Canon PowerShot A80 (PTP)
+"""sucher3 - Ambilight Sucher for Raspberry Pi + webcam (V4L2)
 
 Does the same as sucher2 (the ESP32-CAM sketch): samples colors along a
 trapezoid window on the TV picture and streams Hyperion UDP frames to the
@@ -13,9 +13,10 @@ FRAME's native pixel space - reported in /api/ambilight as "frameSize".
 The JS UI converts canvas <-> frame space with that.
 
 Usage:
-  python3 main.py --source ptp            # real camera
-  python3 main.py --source synth          # no camera needed (dev/test)
-  python3 main.py --leuchter 192.168.0.40 # test sender against udpcatch
+  python3 main.py                           # real: webcam on /dev/video0
+  python3 main.py --device /dev/video2      # other webcam slot
+  python3 main.py --source synth            # no webcam needed (dev/test)
+  python3 main.py --leuchter 192.168.0.40   # test sender against udpcatch
 """
 import json
 import socket
@@ -28,7 +29,7 @@ from io import BytesIO
 
 from windows import (calculate_ambilight_windows, sample_colors)
 from sender import HyperionSender
-from grabber import Gphoto2Grabber, SyntheticGrabber, frame_from_jpeg
+from grabber import WebcamGrabber, Gphoto2Grabber, SyntheticGrabber, frame_from_jpeg
 
 DEFAULTS = {
     "leuchter_ip": "192.168.0.107",
@@ -380,7 +381,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8"/>
-  <title>sucher3 - Raspberry Pi + Canon A80</title>
+  <title>sucher3 - Raspberry Pi + webcam</title>
   <style>
     #stream-container { position: relative; display: inline-block; }
     #overlay { position: absolute; left: 0; top: 0; pointer-events: none; }
@@ -389,7 +390,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   </style>
 </head>
 <body>
-  <h1>sucher3 Live View (Canon PowerShot A80, PTP) - v2</h1>
+  <h1>sucher3 Live View (webcam via V4L2) - v2</h1>
   <div id="camstats" style="font:12px monospace; margin-top:4px;">cam fps: – | mode: event | send: 1 fps | fade: 0</div>
   <div id="stream-container">
     <img id="stream" width="640" height="480"/>
@@ -640,14 +641,19 @@ def save_state():
 def main():
     import argparse
     ap = argparse.ArgumentParser(description="sucher3 daemon")
-    ap.add_argument("--source", choices=["ptp", "synth", "off"],
-                    default="ptp")
+    ap.add_argument("--source", choices=["webcam", "ptp", "synth", "off"],
+                    default="webcam",
+                    help="webcam = V4L2 (/dev/videoN), ptp = Canon A80 "
+                         "(broken, kept for reference)")
+    ap.add_argument("--device", default="/dev/video0",
+                    help="V4L2 device for the webcam")
     ap.add_argument("--leuchter", default=None,
                     help="target IP (default 192.168.0.107)")
     ap.add_argument("--udp-port", type=int, default=None)
     ap.add_argument("--http-port", type=int, default=8080)
-    ap.add_argument("--fps", type=float, default=2.0,
-                    help="grab/compute/send rate (PTP: 0.5-2 realistic)")
+    ap.add_argument("--fps", type=float, default=4.0,
+                    help="camera grab rate (webcam: 2-10 fine; the send "
+                         "rate to the Leuchter is sendFps, not this)")
     args = ap.parse_args()
 
     global SENDER  # the HTTP handlers reference the single sender
@@ -658,7 +664,8 @@ def main():
 
     load_state()
 
-    source = {"ptp": Gphoto2Grabber(),
+    source = {"webcam": WebcamGrabber(args.device),
+              "ptp": Gphoto2Grabber(),
               "synth": SyntheticGrabber(),
               "off": None}[args.source]
     print(f"[main] source={args.source} "
