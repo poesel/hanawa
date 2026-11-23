@@ -1,0 +1,10 @@
+[Unit]
+Description=sucher3 ambilight webcam daemon (Pi + QuickCam -> Leuchter UDP :1900)
+After=network-online.target
+
+[Service]
+User=markus
+WorkingDirectory=/home/markus/sucher3
+ExecStart=/usr/bin/python3 /home/markus/sucher3/main.py --source webcam
+Restart=on-failure
+RestartSec=5

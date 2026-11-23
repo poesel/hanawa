@@ -21,6 +21,22 @@ webcam --V4L2/JPEG--> Pi (color sampling) --Hyperion UDP :1900--> Leuchter
 | `grabber.py` | frame source: V4L2 webcam grabber (cv2/v4l2-ctl/ffmpeg), PTP + synthetic sources |
 | `grabtest.py` | probe script for the webcam once it is plugged into the Pi |
 
+## systemd service (boot + journalctl)
+The unit lives in this folder as `sucher3.service` (runs as `markus`,
+`WorkingDirectory=/home/markus/sucher3` so `state.json` sits next to the
+code):
+
+```bash
+sudo install -m644 -o root -g root sucher3.service /etc/systemd/system/
+sudo ln -sf /etc/systemd/system/sucher3.service \
+     /etc/systemd/system/multi-user.target.wants/   # = enable at boot
+sudo systemctl start sucher3.service
+systemctl status sucher3.service                    # journalctl -u sucher3 -f for logs
+```
+
+Verified: `systemctl is-enabled` reports `enabled`, HTTP 200 from the LAN
+after start.
+
 ## Coordinate space
 Everything works in the **frame's native pixel space** (webcam: usually
 640×480 or whatever `v4l2-ctl` reports). `/api/ambilight` reports it as
