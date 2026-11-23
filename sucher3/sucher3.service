@@ -5,6 +5,6 @@ After=network-online.target
 [Service]
 User=markus
 WorkingDirectory=/home/markus/sucher3
-ExecStart=/usr/bin/python3 /home/markus/sucher3/main.py --source webcam
+ExecStart=/usr/bin/python3 /home/markus/sucher3/main.py --source webcam --device /dev/video1 --size 320x240
 Restart=on-failure
 RestartSec=5

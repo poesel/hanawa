@@ -7,6 +7,7 @@ one frame take and what is its size?
 
   python3 grabtest.py                 # webcam at /dev/video0
   python3 grabtest.py --device /dev/video2
+  python3 grabtest.py --size 320x240        # force capture size
   python3 grabtest.py --ptp           # old Canon A80 probe (dead cam)
 """
 import glob
@@ -60,8 +61,11 @@ if __name__ == "__main__":
     import sys
     args = sys.argv[1:]
     device = "/dev/video0"
+    size = None
     if "--device" in args:
         device = args[args.index("--device") + 1]
+    if "--size" in args:
+        size = args[args.index("--size") + 1]
 
     if "--ptp" in args:
         show("camera detection", run(["gphoto2", "--auto-detect"], 15))
@@ -88,7 +92,7 @@ if __name__ == "__main__":
         except ImportError:
             have_cv2 = False
         if have_cv2:
-            g = WebcamGrabber(device)
+            g = WebcamGrabber(device, size)
             t0 = time.time()
             ok = 0
             first = None
@@ -106,7 +110,7 @@ if __name__ == "__main__":
         else:
             print("  no OpenCV -> try: sudo apt install python3-opencv")
         # backends with timing: persistent stream, then per-call grabs
-        g = WebcamGrabber(device)
+        g = WebcamGrabber(device, size)
         t0 = time.time()
         ok = 0
         first = None

@@ -110,7 +110,30 @@ brightness). Points, segments and brightness persist to `state.json`.
   grabbed frame (event mode), `failed 0`, `acked 0` while the Leuchter
   is off. `cameraFps: 4.0` in `/api/stats` once a frame landed.
 
+## Second camera: Sony PlayStation Eye (PS3, `1415:2000`)
+Plugged into the same Pi → `/dev/video1`, driver **`gspca_ov534`** (mainline
+kernel since 2.6.29, OV534 chip + OV7721 sensor). The unit now runs
+`--device /dev/video1`, so the Eye is the active source.
+
+- Formats: **`GRBG` (8-bit Bayer) and `YUYV` only — no MJPEG**, so the
+  `--capture-mjpeg` stream backend cannot be used here; OpenCV grabs it and
+  the kernel demosaics (frames arrive as `(480, 640, 3)` RGB).
+- Sizes 320×240 and 640×480; the advertised rates go up to **187 fps**
+  (320×240) / 60 fps (640×480) — far above what the Pi-1 CPU can process, so
+  the rate is CPU-bound, not camera-bound.
+- Exposure/colour **controls exist** (unlike the QuickCam):
+  `brightness`, `contrast`, `saturation`, `hue`, `sharpness`,
+  `white_balance_automatic`, `auto_exposure` (0=Auto/1=Manual),
+  `exposure` (0..255), `gain_automatic`, `gain` (0..63),
+  `horizontal_flip`/`vertical_flip`. Set them once from the shell
+  (`v4l2-ctl -d /dev/video1 --set-ctrl auto_exposure=1 --set-ctrl exposure=200`)
+  — pinning exposure kills the auto-exposure lag a webcam suffers in a
+  TV-lit room.
+- Fixed focus, two positions chosen by rotating the lens barrel: **56°
+  (red dot, close) / 75° (blue dot, long shot)**. Use 56° for a TV at ~3 m.
+  No autofocus, so no focus oscillation to fight.
+- The 4-capsule mic array also shows up in ALSA (`hw:0,0`); harmless.
+
 ## Status
-Fully verified on the Pi with the QuickCam: grabs at 4 fps (throttled),
 128-LED windows, UDP `sent` climbing, UI served. Fade/event modes and
 brightness against the Leuchter still pending once it is powered again.

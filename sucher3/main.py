@@ -679,6 +679,11 @@ def main():
                          "(broken, kept for reference)")
     ap.add_argument("--device", default="/dev/video0",
                     help="V4L2 device for the webcam")
+    ap.add_argument("--size", default=None,
+                    help='force capture size "WxH" (e.g. 320x240). Raw '
+                         "cams (gspca ov534 / PlayStation Eye: YUYV, no "
+                         "MJPEG) move 4x the bytes at 640x480, so the "
+                         "small mode is how frames stay fast on a slow Pi")
     ap.add_argument("--set-ctrl", default="",
                     help="one-time v4l2-ctl -c <ctrls> at startup, e.g. "
                          "\"gain_automatic=0,brightness=200\" to fight dark "
@@ -709,11 +714,11 @@ def main():
         except (FileNotFoundError, subprocess.TimeoutExpired):
             print("[main] v4l2-ctl not usable, --set-ctrl skipped")
 
-    source = {"webcam": WebcamGrabber(args.device),
+    source = {"webcam": WebcamGrabber(args.device, args.size),
               "ptp": Gphoto2Grabber(),
               "synth": SyntheticGrabber(),
               "off": None}[args.source]
-    print(f"[main] source={args.source} "
+    print(f"[main] source={args.source} size={args.size or 'cam default'} "
           f"leuchter={SENDER.leuchter_ip}:{SENDER.port} "
           f"http=:{args.http_port}")
 
