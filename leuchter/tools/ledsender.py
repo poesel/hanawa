@@ -11,6 +11,7 @@ Only Python stdlib. Examples:
     ./ledsender.py --host 192.168.1.101 solid ff0000
     ./ledsender.py --host 192.168.1.101 --fps 30 --loop rainbow
     ./ledsender.py --host 192.168.1.101 --leds 30 fade ff0000 0000ff
+    ./ledsender.py --host 192.168.1.101 --fade 3 solid ff0000
     ./ledsender.py --host 192.168.1.101 chase 00ff00
     ./ledsender.py --host 192.168.1.101            <- interactive menu
 
@@ -56,11 +57,14 @@ def parse_hex(s):
     return tuple(int(s[i:i + 2], 16) for i in (0, 2, 4))
 
 
-def build_frame(leds):
-    """Hyperion UDP LED frame: AA 00 FF <checksum> + RGB per LED."""
+def build_frame(leds, fade_byte=0):
+    """Hyperion UDP LED frame: AA 00 FF <checksum> + RGB per LED (+ optional
+    trailing fade byte: 100 ms units the LEUCHTER interpolates over, 0 = none)."""
     payload = b""
     for (r, g, b) in leds:
         payload += bytes((r, g, b))
+    if fade_byte:
+        payload += bytes((max(1, min(255, fade_byte)),))
     head = bytes([MAGIC_A, NO_COMMAND, MAGIC_B, 0])
     checksum = (head[0] + head[1] + head[2] + sum(payload)) & 0xFF
     return head[:3] + bytes([checksum]) + payload
@@ -241,7 +245,7 @@ def run_pattern(name, args, st, log, key):
     key.start()
     while True:
         leds = make_colors(name, args, st["leds"], step)
-        frame = build_frame(leds)
+        frame = build_frame(leds, st.get("fade", 0))
         if st["dry"]:
             print(f"frame {step}: {frame.hex(' ')} ({len(frame)} bytes)")
             log.tx(frame)
@@ -289,6 +293,10 @@ Patterns: solid <c> | rainbow | fade <a> <b> | chase <c> |
 Settings: fps <f> | leds <n 1..{MAX_LEDS}> | host <ip> | port <p> |
           frames <n> | loop            (loop = send forever)
           retries <n>        (resend frame if no ack, default 2)
+          fade-sec <s>       (LEUCHTER-side fade: every frame blends into
+                              the stripe over s seconds, 0 = instant; the
+                              "fade" pattern above is a different thing -
+                              it computes the mix on the SENDER side)
 Other:    log      (show last 20 log lines) | help | quit
 Example:  chase ff0000
 
@@ -356,6 +364,15 @@ def menu(st, log, key):
                 print(f"retries = {st['retries']}")
             except (IndexError, ValueError):
                 print("usage: retries <number>")
+        elif cmd == "fade-sec":
+            try:
+                sec = float(parts[1])
+                if not 0.0 <= sec <= 25.5:
+                    raise SystemExit("fade-sec must be 0..25.5 s")
+                st["fade"] = int(round(sec * 10))
+                print(f"fade = {sec:g}s on the leuchter (wire byte {st['fade']})")
+            except (IndexError, ValueError):
+                print("usage: fade-sec <seconds 0..25.5>")
         elif cmd in PATTERNS:
             if run_pattern(cmd, parts[1:], st, log, key):
                 print(f"(the {key.key} stopped this pattern)")
@@ -389,6 +406,9 @@ def main():
     ap.add_argument("--dry", action="store_true", help="no UDP, print hex dump")
     ap.add_argument("--log", dest="logfile", default="ledsender.log",
                     help="packet log file (default ./ledsender.log, '-' = no logging)")
+    ap.add_argument("--fade", type=float, default=0.0,
+                    help="LEUCHTER-side fade: each frame blends in over this "
+                        "many seconds (0 = instant, max 25.5)")
     ap.add_argument("--retries", type=int, default=2,
                     help="resend frame if no 0x80 came back (default 2, 0 = off)")
     ap.add_argument("pattern", nargs="?", choices=PATTERNS, help="omitted -> interactive menu")
@@ -397,11 +417,14 @@ def main():
 
     if not 1 <= a.leds <= MAX_LEDS:
         raise SystemExit(f"--leds must be 1..{MAX_LEDS}")
+    if not 0.0 <= a.fade <= 25.5:
+        raise SystemExit("--fade must be 0..25.5 seconds")
 
     log = PktLog(None if a.logfile == "-" else a.logfile)
 
     st = {"host": a.host or "127.0.0.1", "port": a.port, "leds": a.leds,
           "fps": a.fps, "loop": a.loop, "frames": a.frames, "dry": a.dry,
+          "fade": int(round(a.fade * 10)),  # wire byte: units of 100 ms
           "retries": max(0, a.retries), "sender": None,
           "sent": 0, "acked": 0, "missed": 0, "lat_sum": 0.0, "lat_max": 0.0}
     if not a.dry:

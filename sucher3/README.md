@@ -60,19 +60,18 @@ brightness). Points, segments and brightness persist to `state.json`.
 
 ### Send policy (new in sucher3)
 - **Mode switch** (UI checkbox / `POST /api/mode {"mode":"event"|"time"}`):
-  - `event` (default): one UDP packet per new camera picture. No fps, no
-    fade — the packet rate equals the camera rate.
+  - `event` (default): one UDP packet per new camera picture.
   - `time`: packets are emitted at **Send-FPS** independent of the camera
     (UI slider 0.2–5 → `POST /api/sendfps {"value":F}`); each new camera
-    measurement only updates the color *target*.
-- **Fade slider 0–10** (`POST /api/fade {"value":N}`): in time mode the
-  transition from the last sent colors to a new measurement is spread
-  linearly over N packets (0 = jump immediately with next packet). A new
-  measurement during a fade restarts the fade from the current
-  interpolated color.
+    measurement only updates the color *target*, the sender re-emits it.
+- **Fade slider 0–10 s** (`POST /api/fade {"value":N}`) — works in **both**
+  modes: the fade is now a PROTOCOL feature, every datagram carries a tail
+  byte (duration in 100 ms units) and the LEUCHTER interpolates from its
+  current colors to the received ones over that many seconds on its own
+  40 ms timer. The Pi sends no intermediate frames. 0 = instant.
 - **Camera fps** is measured (exp. moving average over successful grabs)
   and shown in the UI status line + reported by `/api/stats` as
-  `cameraFps` (plus `sendFps`, `fadeFrames`, `mode`).
+  `cameraFps` (plus `sendFps`, `fadeSeconds`, `mode`).
 
 ## Webcam / V4L2 notes
 - Works with any model the kernel shows as `/dev/videoN` (UVC). When you

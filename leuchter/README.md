@@ -121,7 +121,10 @@ stripe does not prove that the current firmware writes to it.
 
 See [PLAN.md](PLAN.md). Short version:
 
-- Sender sends `AA 00 FF <chk> R G B ...` (3 bytes per LED) to port 1900.
+- Sender sends `AA 00 FF <chk> R G B ...` (3 bytes per LED) to port 1900,
+  optionally followed by one **fade byte** (units of 100 ms, `ledsender.py
+  --fade 3`): the ESP blends from what it shows to the new colors over that
+  time instead of jumping, and answers `0x80` right away anyway.
 - ESP applies the frame to the stripe, then answers with a one-byte UDP packet `0x80`.
 - Invalid magic/checksum: packet rejected, no `0x80` sent, logged on stdout.
 - The receiver accepts frames of **1..`MAX_LEDS` (150) LEDs** and addresses exactly
@@ -129,7 +132,7 @@ See [PLAN.md](PLAN.md). Short version:
   the binary does not know the stripe. The checksum is verified over *every*
   triplet of the received payload. Blocks beyond the physical stripe are dropped by
   the stripe's connector; LEDs behind a shorter frame stay black. The console prints
-  e.g. `frame: 150 LEDs -> ack 0x80`.
+  e.g. `frame: 150 LEDs, fade 30 -> ack 0x80` (fade in 100 ms units, 0 = instant).
 - The stripe cannot tell the ESP how long it is (APA102 is a one-way pass-through,
   no read-back channel), which is why nothing has to know that number.
 

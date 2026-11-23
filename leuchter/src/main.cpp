@@ -10,8 +10,14 @@
  *   [0] 0xAA  (magic)
  *   [1] 0x00  (no command) / 0xAB (command byte follows at [4])
  *   [2] 0xFF  (magic)
- *   [3] checksum: low byte of sum(bytes[0..2] + all color bytes)
+ *   [3] checksum: low byte of sum(bytes[0..2] + all color bytes + fade byte)
  *   [4..] R G B per LED (with 0xAB: starting at [5])
+ *   optional trailing byte after the last triplet: FADE in units of 100 ms
+ *     (1 = 0.1 s .. 255 = 25.5 s). If present and > 0 the stripe does NOT
+ *     jump to the new colors: it interpolates from whatever it currently
+ *     shows to the new colors over that duration, on its own timer (a new
+ *     frame arriving mid-fade restarts the fade from the current mix).
+ *     Absent/0 = old instant behaviour, so sucher2 frames are unaffected.
  *
  * The checksum always covers the whole received payload. The frame decides how
  * many LEDs are addressed: a datagram with n triplets sends exactly n APA102
@@ -39,8 +45,10 @@ uint8_t rxbuf[UDP_BUF_RX];
 
 // Validate header and checksum. Returns number of RGB triplets, 0 = invalid.
 // On success *rgb_out points at the first color byte (behind the optional
-// 0xAB command byte).
-static int parseHyperion(const uint8_t *buf, int len, const uint8_t **rgb_out) {
+// 0xAB command byte) and *fade_out holds the trailing fade byte (0 if the
+// frame has no tail, i.e. instant).
+static int parseHyperion(const uint8_t *buf, int len, const uint8_t **rgb_out,
+                        uint8_t *fade_out) {
   if (len < 5) return 0;
   if (buf[0] != 0xAA || buf[2] != 0xFF) return 0;
 
@@ -48,28 +56,75 @@ static int parseHyperion(const uint8_t *buf, int len, const uint8_t **rgb_out) {
   if (buf[1] == 0xAB) off = 5;  // skip command byte
   else if (buf[1] != 0x00) return 0;
 
-  int colors = (len - off) / 3;
+  int rem = len - off;
+  int colors = rem / 3;
+  int tail = rem % 3;  // 0 = no fade byte, 1 = trailing fade byte, 2 = broken
+  if (tail == 2) return 0;
   if (colors <= 0) return 0;
   if (colors > MAX_LEDS) return 0;  // longer than the buffer/stripe capacity allows
 
   uint8_t sum = 0;
-  for (int i = 0; i < 3; i++) sum += buf[i];        // header without checksum byte
-  for (int i = off; i < off + colors * 3; i++) sum += buf[i];
+  for (int i = 0; i < 3; i++) sum += buf[i];  // header without checksum byte
+  for (int i = off; i < off + colors * 3 + tail; i++) sum += buf[i];
   if (sum != buf[3]) return 0;  // wrong checksum
 
   *rgb_out = buf + off;
+  *fade_out = tail ? buf[off + colors * 3] : 0;
   return colors;
 }
 
-/* -------- LED frame -------- */
+/* -------- LED frame + fade state -------- */
 
-static void renderFrame(const uint8_t *rgb, int colors) {
-  // The frame's own length is the number of LEDs addressed; nothing here knows
-  // the physical stripe length.
-  for (int i = 0; i < colors; i++) {
-    stripe.setPixel(i, rgb[i * 3], rgb[i * 3 + 1], rgb[i * 3 + 2]);
+// cur = what the stripe shows right now, tgt = newest target, start = mix
+// base of the running fade. All three are RGB bytes, LED 0..MAX_LEDS-1.
+static uint8_t curC[MAX_LEDS * 3];
+static uint8_t tgtC[MAX_LEDS * 3];
+static uint8_t startC[MAX_LEDS * 3];
+static int frameLeds = 0;        // LEDs addressed by cur/tgt
+static uint32_t fadeDurMs = 0;   // running fade duration, 0 = nothing running
+static uint32_t fadeElapsedMs = 0;
+
+static void renderCur() {
+  for (int i = 0; i < frameLeds; i++) {
+    stripe.setPixel(i, curC[i * 3], curC[i * 3 + 1], curC[i * 3 + 2]);
   }
-  stripe.setNumLeds(colors);
+  stripe.setNumLeds(frameLeds);
+  stripe.show();
+}
+
+static void newFrame(const uint8_t *rgb, int colors, uint8_t fadeByte) {
+  if (fadeByte == 0) {  // instant: old behaviour
+    frameLeds = colors;
+    for (int i = 0; i < colors * 3; i++) {
+      curC[i] = tgtC[i] = rgb[i];
+      startC[i] = rgb[i];
+    }
+    fadeDurMs = 0;
+    renderCur();
+    return;
+  }
+  // start the fade from the CURRENT mix (also valid mid-fade)
+  frameLeds = colors;  // NOTE: a frame with a different length restarts geometry
+  for (int i = 0; i < colors * 3; i++) {
+    startC[i] = curC[i];
+    tgtC[i] = rgb[i];
+  }
+  fadeDurMs = (uint32_t)fadeByte * 100;
+  fadeElapsedMs = 0;
+}
+
+// advance the animation by dtMs; returns true if something was shown
+static bool stepFade(uint32_t dtMs) {
+  if (fadeDurMs == 0) return false;
+  fadeElapsedMs += dtMs;
+  if (fadeElapsedMs >= fadeDurMs) fadeElapsedMs = fadeDurMs;
+  for (int i = 0; i < frameLeds * 3; i++) {
+    int a = startC[i], b = tgtC[i];
+    curC[i] = (uint8_t)(a + (int64_t)(b - a) * fadeElapsedMs / fadeDurMs);
+  }
+  if (fadeElapsedMs >= fadeDurMs) fadeDurMs = 0;  // arrived, stop animating
+  renderCur();
+  return true;
 }
 
 /* -------- WLAN-Statusdrucken -------- */
@@ -163,34 +218,41 @@ void loop() {
   ArduinoOTA.handle();  // no-op until an OTA upload arrives; also keeps mDNS alive
 
   int len = udp.parsePacket();
-  if (len <= 0) {
-    delay(1);
-    return;
+  if (len > 0) {
+    // one datagram max UDP_BUF_RX bytes, read it completely
+    if (len > UDP_BUF_RX) len = UDP_BUF_RX;
+    int got = udp.read(rxbuf, len);
+
+    // remember sender so the health byte can go back to him
+    IPAddress sender = udp.remoteIP();
+    uint16_t sport = udp.remotePort();
+
+    const uint8_t *rgb = nullptr;
+    uint8_t fadeByte = 0;
+    int colors = parseHyperion(rxbuf, got, &rgb, &fadeByte);
+    if (colors == 0) {
+      Serial.print("invalid UDP packet (");
+      Serial.print(got);
+      Serial.println(" bytes), rejected");
+    } else {
+      newFrame(rgb, colors, fadeByte);  // instant frames show right away
+      ack.beginPacket(sender, sport);
+      ack.write(HEALTH_BYTE);
+      ack.endPacket();
+      Serial.print("frame: ");
+      Serial.print(colors);
+      Serial.print(" LEDs, fade ");
+      Serial.print(fadeByte);  // 100ms units, 0 = instant
+      Serial.println(" -> ack 0x80");
+    }
   }
 
-  // one datagram max UDP_BUF_RX bytes, read it completely
-  if (len > UDP_BUF_RX) len = UDP_BUF_RX;
-  int got = udp.read(rxbuf, len);
-
-  // remember sender so the health byte can go back to him
-  IPAddress sender = udp.remoteIP();
-  uint16_t sport = udp.remotePort();
-
-  const uint8_t *rgb = nullptr;
-  int colors = parseHyperion(rxbuf, got, &rgb);
-  if (colors == 0) {
-    Serial.print("invalid UDP packet (");
-    Serial.print(got);
-    Serial.println(" bytes), rejected");
-  } else {
-    renderFrame(rgb, colors);
-    stripe.show();
-    ack.beginPacket(sender, sport);
-    ack.write(HEALTH_BYTE);
-    ack.endPacket();
-    Serial.print("frame: ");
-    Serial.print(colors);
-    Serial.println(" LEDs -> ack 0x80");
+  // fade animation ticks even when no new datagram arrives
+  static uint32_t lastAnim = 0;
+  uint32_t now = millis();
+  if (now - lastAnim >= FADE_TICK_MS) {
+    stepFade(now - lastAnim);
+    lastAnim = now;
   }
 
   delay(1);

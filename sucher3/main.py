@@ -40,13 +40,17 @@ DEFAULTS = {
     "hSeg": 40,                # 128-LED stripe: 40 top + 40 bottom
     "vSeg": 26,                # 24 + 24 on the sides
     "brightness": 100,         # percent, 0 = off
-    "sendFps": 1.0,            # time-mode: UDP packets per second (any rate
-                               # the camera delivers is decoupled from this)
-    "fadeFrames": 0,           # time-mode: fade from last sent colors to the
-                               # newly measured ones over this many packets
-                               # (0 = jump immediately, 10 = 10 packets)
+    "sendFps": 1.0,            # time-mode: how many UDP packets per second
+                               # go to the Leuchter (its own constant rate,
+                               # independent of the camera rate)
+    "fadeSeconds": 0,          # fade duration in SECONDS (0..10): the
+                               # LEUCHTER blends from its current colors to
+                               # the received ones over this time (protocol
+                               # tail byte in 100 ms units). 0 = instant.
+                               # Works in BOTH modes.
     "mode": "event",           # "event": one packet per new camera frame
-                               # "time": packets at sendFps + fading active
+                               # "time": packets at sendFps (re-emitting the
+                               # newest measurement; Leuchter does the fade)
 }
 
 STATE = {
@@ -58,6 +62,7 @@ STATE = {
     "started": time.time(),
     "cam_fps": None,           # exp. moving average of the camera grab rate
     "cam_last": None,          # time of the previous successfully grabbed frame
+    "last_colors": None,       # newest measured colors (time-mode re-emits)
 }
 LOCK = threading.Lock()
 
@@ -90,7 +95,7 @@ class AmbilightStateHandler(SimpleHTTPRequestHandler):
                 "udp": dict(sender.stats() if sender else {}),
                 "cameraFps": round(cam, 2) if cam else None,
                 "sendFps": cfg["sendFps"],
-                "fadeFrames": cfg["fadeFrames"],
+                "fadeSeconds": cfg["fadeSeconds"],
                 "mode": cfg["mode"],
             })
         else:
@@ -126,13 +131,13 @@ class AmbilightStateHandler(SimpleHTTPRequestHandler):
         elif route == "/api/fade":
             v = parse_value(body)
             if v is None or not (0 <= v <= 10):
-                self.send_json(400, {"error": "fade needs int 0..10"})
+                self.send_json(400, {"error": "fade needs int 0..10 (s)"})
             else:
                 with LOCK:
-                    STATE["config"]["fadeFrames"] = v
+                    STATE["config"]["fadeSeconds"] = int(v)
                 save_state()
                 self.send_json(200, {"status": "ok",
-                                     "fadeFrames": v})
+                                     "fadeSeconds": int(v)})
         elif route == "/api/mode":
             m = (body.get("mode") or body.get("value")
                  if isinstance(body, dict) else body)
@@ -278,48 +283,10 @@ def grid_response(body):
 SENDER = HyperionSender()  # (re)created in main() with the CLI args
 
 
-class ColorFader:
-    """time-mode sending: the packet stream interpolates linearly from the
-    last SENT colors toward the latest MEASURED target over fadeFrames
-    packets (0 = jump to new values with the next packet)."""
-
-    def __init__(self):
-        self.sent = None     # colors of the last packet actually sent
-        self.start = None    # fade start snapshot
-        self.target = None   # latest measured colors
-        self.step = 0
-        self.fade = 0
-
-    def set_target(self, colors, steps):
-        """new measurement arrived -> restart the fade from wherever we are"""
-        self.target = list(colors)
-        self.start = list(self.sent) if self.sent else list(colors)
-        self.step = 0
-        self.fade = max(0, min(10, int(steps)))
-
-    def next_packet(self):
-        """advance one packet, return the interpolated colors (or None)."""
-        if self.target is None:
-            return None
-        if self.fade <= 0:
-            self.sent = list(self.target)
-        else:
-            self.step = min(self.step + 1, self.fade)
-            t = self.step / self.fade
-            self.sent = [tuple(int(round(a + (b - a) * t))
-                               for a, b in zip(s, g))
-                         for s, g in zip(self.start, self.target)]
-        return self.sent
-
-    def snap(self, colors):
-        """event-mode: remember what was sent last, for a clean mode switch."""
-        self.sent = list(colors)
-        if self.target is None:
-            self.target = list(colors)
-
-
-FADER = ColorFader()
-
+# NOTE: no client-side fader anymore since the fade became a PROTOCOL
+# feature: every datagram carries a fade byte (units of 100 ms) and the
+# Leuchter interpolates cur -> new on its own 40 ms timer. The Pi only
+# keeps the latest measured colors so time-mode can re-emit them.
 
 class ComputeLoop:
     """Grabs frames, computes colors, sends UDP frames - like the sketch's
@@ -373,14 +340,17 @@ class ComputeLoop:
         colors = (list(rightc) + list(reversed(bottomc))
                   + list(reversed(leftc)) + list(topc))
 
-        # event mode: one packet per new camera frame, no fade/no fps policy
-        # time mode: only remember the target -> sender_loop emits packets
+        # the fade lives in the PROTOCOL now: both modes send the fade byte
+        # (seconds x 10 = units of 100 ms), the Leuchter animates the mix
+        fade = int(cfg["fadeSeconds"])
         if cfg["mode"] == "event":
-            SENDER.send_frame(colors)
+            SENDER.send_frame(colors, fade100ms=fade * 10)
             SENDER.poll_ack()
-            FADER.snap(colors)
         else:
-            FADER.set_target(colors, cfg["fadeFrames"])
+            # time mode: only remember the newest measurement, the sender
+            # thread re-emits it at sendFps
+            with LOCK:
+                STATE["last_colors"] = colors
 
         with LOCK:
             STATE["jpeg"] = None    # snapshot re-encoded on demand
@@ -399,15 +369,18 @@ class ComputeLoop:
 
 
 def sender_loop():
-    """time-mode: emit UDP packets at sendFps, fully decoupled from the
-    camera rate. In event mode this does nothing."""
+    """time-mode: re-emit the latest measured colors at sendFps so the
+    Leuchter gets fresh targets at a constant rate; the actual blending
+    happens on the Leuchter (fade byte). In event mode this does nothing."""
     while True:
         t0 = time.time()
         try:
             if STATE["config"]["mode"] == "time":
-                colors = FADER.next_packet()
+                with LOCK:
+                    colors = STATE["last_colors"]
                 if colors:
-                    SENDER.send_frame(colors)
+                    fade = int(STATE["config"]["fadeSeconds"])
+                    SENDER.send_frame(list(colors), fade100ms=fade * 10)
                     SENDER.poll_ack()
         except Exception as e:  # never kill the loop
             print(f"[sender] {e}")
@@ -430,7 +403,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 </head>
 <body>
   <h1>sucher3 Live View (webcam via V4L2) - v2</h1>
-  <div id="camstats" style="font:12px monospace; margin-top:4px;">cam fps: – | mode: event | send: 1 fps | fade: 0</div>
+  <div id="camstats" style="font:12px monospace; margin-top:4px;">cam fps: – | mode: event | send: 1 fps | fade: 0 s (Leuchter)</div>
   <div id="stream-container">
     <img id="stream" width="640" height="480"/>
     <canvas id="overlay" width="640" height="480"></canvas>
@@ -448,28 +421,29 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <input type="number" id="vSeg" value="26" min="1" style="width:60px;">
       </label>
       <br/>
-      <label>Brightness (%):
+      <label title="0 = Stripe completely off (black frames are sent)">Brightness (%):
         <input type="range" id="bright" min="0" max="100" value="100"
                step="5" style="width:120px;">
       </label>
       <span id="brightVal">100 %</span>
       <br/>
-      <label>Send-FPS (Time-Mode):
+      <label title="unchecked (Event-Mode): the Sucher sends one UDP packet to the Leuchter per new camera image. checked (Time-Mode): UDP packets are sent at a constant rate (Send-FPS); each new image only updates the color TARGET, the Leuchter blends towards it over Fade seconds.">Send-Mode
+        (⬜=Event: packet per image | ✅=Time: constant rate):
+        <input type="checkbox" id="modeTime">
+      </label>
+      <span id="modeVal">Event-Mode</span>
+      <br/>
+      <label title="Time-Mode only: how many UDP packets per second the Leuchter receives regardless of the camera rate">Send-FPS (Time-Mode only):
         <input type="range" id="sendfps" min="0.2" max="5" value="1"
                step="0.1" style="width:120px;">
       </label>
       <span id="sendFpsVal">1 fps</span>
       <br/>
-      <label>Fade (Packages):
+      <label title="fade happens on the LEUCHTER (protocol byte, works in BOTH modes): the stripe interpolates from its current colors to the received ones over this many seconds, 0 = jump instantly">Fade (s, Leuchter):
         <input type="range" id="fade" min="0" max="10" value="0"
                step="1" style="width:120px;">
       </label>
-      <span id="fadeVal">0</span>
-      <br/>
-      <label>Time-Mode?
-        <input type="checkbox" id="modeTime">
-      </label>
-      <span id="modeVal">Event-Mode</span>
+      <span id="fadeVal">0 s</span>
     </div>
 
     <button id="reset" style="margin-top:10px;">Punkte zurückseet</button>
@@ -604,10 +578,22 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
     // ---- cam-fps display + send policy (fps / fade / mode) --------------
     const camStats = document.getElementById('camstats');
+    const brightVal = document.getElementById('brightVal');
+    const sendFpsVal = document.getElementById('sendFpsVal');
+    const fadeVal = document.getElementById('fadeVal');
+    const modeVal = document.getElementById('modeVal');
     function fetchStats() {
       fetch('/api/stats').then(r => r.json()).then(d => {
         camStats.textContent =
-          `cam fps: ${d.cameraFps ?? '-'} | mode: ${d.mode} | send: ${d.sendFps} fps | fade: ${d.fadeFrames} pkg`;
+          `cam fps: ${d.cameraFps ?? '-'} | mode: ${d.mode} | send: ${d.sendFps} fps | fade: ${d.fadeSeconds} s (Leuchter)`;
+        // the small labels beside the controls always show what the
+        // SERVER has - if you drag a slider and this number follows,
+        // the value made it to the daemon
+        brightVal.textContent = `${d.udp.brightness} %`;
+        sendFpsVal.textContent = `${d.sendFps} fps`;
+        fadeVal.textContent = `${d.fadeSeconds} s`;
+        modeVal.textContent = d.mode === 'time'
+          ? 'Time-Mode (constant rate)' : 'Event-Mode (per image)';
       }).catch(console.error);
     }
     setInterval(fetchStats, 2000);
@@ -632,6 +618,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
     const fadeInput = document.getElementById('fade');
     fadeInput.addEventListener('input',
       e => pushFade(fadeInput.value));
+
+    // belt and braces: browsers may skip the 'input' event when a slider
+    // is dragged fast or the page reloads - re-push the DOM values, the
+    // server set is idempotent
+    setInterval(() => {
+      pushSendFps(sendfpsInput.value);
+      pushFade(fadeInput.value);
+    }, 4000);
 
     function pushMode(on) {
       const m = on ? 'time' : 'event';
@@ -668,7 +662,7 @@ def load_state():
 def save_state():
     with LOCK:
         cfg = {k: STATE["config"][k] for k in ("points", "hSeg", "vSeg",
-                "sendFps", "fadeFrames", "mode")}
+                "sendFps", "fadeSeconds", "mode")}
     cfg["brightness"] = SENDER.brightness
     try:
         with open("state.json", "w") as f:

@@ -50,6 +50,14 @@
 /* Hyperion health/sync byte */
 #define HEALTH_BYTE   0x80
 
+/* ---------------- Fade ---------------- */
+/* A datagram may carry a trailing byte = fade duration in units of 100 ms
+   (see main.cpp protocol doc). The ESP interpolates cur -> new on this
+   timer; the tick is the animation resolution (40 ms = 25 fps). */
+#ifndef FADE_TICK_MS
+#define FADE_TICK_MS  40
+#endif
+
 /* ---------------- OTA ---------------- */
 /* ArduinoOTA listens on this port (default 8266) and offers the compiled
    sketch over WLAN; see README.md for the upload command. No password, so

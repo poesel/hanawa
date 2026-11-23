@@ -19,8 +19,9 @@ Binary protocol, identical to the Hyperion "UDP LED" protocol, so the Sucher can
 | 0 | `0xAA` (magic) |
 | 1 | `0x00` (no command) / `0xAB` (command follows) |
 | 2 | `0xFF` (magic) |
-| 3 | checksum: low byte of `sum(bytes[0..2] + all color bytes)` |
+| 3 | checksum: low byte of `sum(bytes[0..2] + all color bytes + fade byte)` |
 | 4… | `R G B` triplets, LED 0 … LED n-1 |
+| 4+3n | optional `FADE` in units of 100 ms (1 = 0.1 s … 255 = 25.5 s) |
 
 ### Answer packet (Leuchter → Sucher), 1 byte
 
@@ -41,6 +42,13 @@ Rules:
 - UDP receive buffer: `454 + 6` bytes receive (derived from `MAX_LEDS`), 8 bytes send
   (`WiFiUDP` in the ESP8266 core).
 - `0x80` is only sent **after** the frame has been applied to the stripe → the Sucher can wait for it as a frame-sync signal.
+- **Fade (new)**: an optional trailing byte = fade duration in units of 100 ms.
+  The ESP then does NOT jump to the new colors but interpolates from the colors it
+  currently shows to the received ones on a 40 ms timer (`FADE_TICK_MS`, 25 fps),
+  and answers `0x80` immediately (the ack means "frame accepted", not "fade done").
+  A frame arriving mid-fade restarts the fade from the current mix. Byte absent/0
+  = old instant behaviour, so sucher2 frames are unaffected. `ledsender.py` has
+  `--fade <seconds>` / menu `fade-sec <s>` to test it.
 
 ## Software
 
