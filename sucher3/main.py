@@ -714,15 +714,20 @@ def load_state():
     try:
         with open("state.json") as f:
             saved = json.load(f)
-        cfg = STATE["config"]
-        cfg.update({k: v for k, v in saved.items() if k in cfg})
-        if cfg["points"]:
-            cfg["points"] = [tuple(p) for p in cfg["points"]]
-        if "brightness" in saved:
-            SENDER.set_brightness(saved["brightness"])
-        print("state.json loaded")
+    except (ValueError, UnicodeError):
+        # truncated/empty file (an interrupted write) -> defaults, but the
+        # daemon must still start
+        print("state.json unreadable, using defaults")
+        return
     except FileNotFoundError:
-        pass
+        return
+    cfg = STATE["config"]
+    cfg.update({k: v for k, v in saved.items() if k in cfg})
+    if cfg["points"]:
+        cfg["points"] = [tuple(p) for p in cfg["points"]]
+    if "brightness" in saved:
+        SENDER.set_brightness(saved["brightness"])
+    print("state.json loaded")
 
 
 def save_state():
@@ -730,9 +735,15 @@ def save_state():
         cfg = {k: STATE["config"][k] for k in ("points", "hSeg", "vSeg",
                 "sendFps", "fadeMs", "mode")}
     cfg["brightness"] = SENDER.brightness
+    # atomic: a half-written state.json (killed process, crash mid-write)
+    # used to brick every later start, load_state then read an empty file
+    tmp = "state.json.tmp"
     try:
-        with open("state.json", "w") as f:
+        with open(tmp, "w") as f:
             json.dump(cfg, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, "state.json")
     except OSError:
         pass
 

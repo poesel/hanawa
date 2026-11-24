@@ -77,7 +77,10 @@ below ~8 % the triplets fall to single digits of 255 and the stripe reads as
 off), wide slider for aiming
 (0 = off) → `POST /api/brightness`,
 plus `GET /api/ambilight`, `/api/stats` (uptime + UDP sent/acked/failed +
-brightness). Points, segments and brightness persist to `state.json`.
+brightness). Points, segments and brightness persist to `state.json`,
+written atomically (tmp + `os.replace`) and re-read tolerantly — a
+truncated file used to throw in `load_state` and make every systemd
+start exit 1, which looked like a dead daemon with the port still open.
 The preview boxes are filled with the **true measured color** (not dimmed
 by the LED brightness) so they stay readable at low brightness.
 The sampling boxes reach 2 window segments into the screen (`depth` in
@@ -120,7 +123,13 @@ the deep top/bottom bands own the corner and no box sits inside another.
 - Backends auto-selected, first that works wins: **raw Bayer stream**
   (`v4l2-ctl --stream-mmap` + numpy, the PS Eye's case: gspca streams its
   native 640x480 even when the format list offers 320x240 first, so the
-  frame size is MEASURED once and the Bayer 2x2 blocks decimated), then
+  frame size is MEASURED once and the Bayer 2x2 blocks decimated, and the
+  format is PINNED with `--set-fmt-video=…pixelformat=GRBG` in both the
+  measure and the stream — the device keeps whatever format the last
+  program that touched it negotiated, so a `cv2` probe leaves it in YUYV
+  (2 bytes/px = 614400 at 640x480) and an unpinned stream then drifts by
+  half a frame per grab: jumping, wrongly tinted preview frames. A cheap
+  `v4l2-ctl -V` re-check every 5 min re-pins after such a visitor), then
   OpenCV (`cv2.VideoCapture`), ffmpeg raw stream, v4l2-ctl streams,
   per-call `v4l2-ctl --to-jpg`. The Pi's `v4l2-ctl` has no capture
   options and `ffmpeg -f v4l2` fails on this cam.

@@ -52,6 +52,8 @@ class WebcamGrabber:
         self.ffwh = None          # ffmpeg raw stream frame size
         self.ffn = None           # bytes per raw frame
         self.bayer_fmt = None     # probed (ok, [sizes]) of native Bayer stream
+        self.bayer_pf = None      # fourcc of format [0] ('GRBG' on the PS Eye)
+        self.bayer_fmt_at = 0.0   # last cheap re-check of the pinned format
         self.bayer_dead = False   # cam is not Bayer -> fall through chain
         self.bayer_probe_at = 0.0 # last probe time (retry max every 5 s)
         self.bayer_wh = None      # native (w,h) of the Bayer stream
@@ -156,23 +158,34 @@ class WebcamGrabber:
         if not m:
             return None
         ok = any(b in m.group(1) for b in ("GRBG", "GBRG", "BGGR", "BAYER"))
+        # fourcc of format [0] ('GRBG' on the PS Eye) -> every stream call
+        # pins the format with it, see _bayer_measure
+        self.bayer_pf = m.group(1).split()[0]
         # only the sizes of format [0] count -> cut off at the next format
         block = txt.split("[1]:")[0]
         sizes = [(int(a), int(b)) for a, b in
                  re.findall(r"Size:\s+Discrete\s+(\d+)x(\d+)", block)]
         return ok, sizes
 
-    def _bayer_measure(self):
+    def _bayer_measure(self, wh=None):
         """Bytes of ONE frame as the stream really delivers it. The format
         list's first size entry is NOT what gspca streams (the PS Eye lists
         320x240 but streams its native 640x480 = 307200 Bayer bytes), and
         a wrong frame size silently drifts the window by a few hundred
         bytes per grab -> the preview looks like a jumping enlarged crop.
-        So the size is MEASURED, once, with a single-frame capture."""
+        So the size is MEASURED, once, with a single-frame capture.
+
+        The capture pins the format (`--set-fmt-video`): the device keeps
+        whatever format the LAST program that touched it negotiated, so a
+        cv2 probe leaves it in YUYV (2 bytes/px = 614400 at 640x480) and an
+        unpinned stream then drifts by half a frame per grab again."""
+        args = [f"--device={self.device}"]
+        if wh:
+            args += [f"--set-fmt-video=width={wh[0]},height={wh[1]},"
+                     f"pixelformat={self.bayer_pf}"]
         try:
-            out = subprocess.run(["v4l2-ctl", f"--device={self.device}",
-                                  "--stream-mmap", "--stream-count=1",
-                                  "--stream-to=-"],
+            out = subprocess.run(args + ["--stream-mmap", "--stream-count=1",
+                                         "--stream-to=-"],
                                  capture_output=True, timeout=20)
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             return 0
@@ -181,9 +194,9 @@ class WebcamGrabber:
     def _bayer_pick(self, sizes):
         """(w,h) the stream uses: the measured frame matched against the
         advertised sizes (largest wins if the measure came back odd)."""
-        n = self._bayer_measure()
-        for (w, h) in sorted(sizes or [], key=lambda s: s[0] * s[1],
-                             reverse=True):
+        big = sorted(sizes or [], key=lambda s: s[0] * s[1], reverse=True)
+        n = self._bayer_measure(big[0] if big else None)
+        for (w, h) in big:
             if w * h == n:
                 return (w, h)
         if n >= 4096:                       # unlisted but plausible
@@ -191,14 +204,47 @@ class WebcamGrabber:
             h = (n // w) if w else 0
             if w and h and w * h == n:
                 return (w, h)
-        return max(sizes, key=lambda s: s[0] * s[1]) if sizes else None
+        return big[0] if big else None
 
     def _bayer_spawn(self):
+        """Persistent stream in the cam's native Bayer format, pinned with
+        --set-fmt-video: the device otherwise keeps whatever format the
+        last program that touched it left behind (a cv2 probe means YUYV
+        = 2 bytes/px), and a wrong bytes-per-frame silently drifts the
+        read window -> jumping, wrongly colored preview frames."""
+        args = ["v4l2-ctl", f"--device={self.device}"]
+        if self.bayer_wh and getattr(self, "bayer_pf", None):
+            w, h = self.bayer_wh
+            args += [f"--set-fmt-video=width={w},height={h},"
+                     f"pixelformat={self.bayer_pf}"]
         self.proc = subprocess.Popen(
-            ["v4l2-ctl", f"--device={self.device}", "--stream-mmap",
-             "--stream-to=-", "--stream-count=0"],
+            args + ["--stream-mmap", "--stream-to=-", "--stream-count=0"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         self.buf = b""
+
+    def _bayer_fmt_drifted(self):
+        """True if the device's CURRENT format no longer matches the one the
+        running stream was pinned to. Something else (a cv2/ffprobe call)
+        re-negotiated it -> the stream now hands out a different number of
+        bytes per frame and the fixed read window drifts again. VIDIOC_G_FMT
+        only, so this is cheap and cannot disturb the device."""
+        if time.time() - self.bayer_fmt_at < 300.0:
+            return False
+        self.bayer_fmt_at = time.time()
+        try:
+            out = subprocess.run([f"v4l2-ctl", f"--device={self.device}",
+                                  "-V"], capture_output=True, timeout=10)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return False
+        if out.returncode != 0:
+            return False
+        txt = out.stdout.decode(errors="ignore")
+        pf = re.search(r"Pixel Format\s*:\s*'(\w+)'", txt)
+        sz = re.search(r"Size Image\s*:\s*(\d+)", txt)
+        if not pf or not sz:
+            return False
+        w, h = self.bayer_wh or (0, 0)
+        return pf.group(1) != self.bayer_pf or int(sz.group(1)) != w * h
 
     def _bayer_rgb(self, raw):
         """GRBG Bayer bytes -> RGB (H,W,3) ndarray. The Bayer 2x2 blocks
@@ -257,6 +303,9 @@ class WebcamGrabber:
                 self._bayer_spawn()
             except FileNotFoundError:
                 return None
+        elif self._bayer_fmt_drifted():
+            self._bayer_spawn()       # re-pin the format, drop the drift
+            return None
         w, h = self.bayer_wh
         ffn = w * h                   # Bayer = ONE byte per pixel
         deadline = time.time() + timeout
