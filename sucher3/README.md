@@ -89,7 +89,8 @@ deeper than one band); side boxes adjacent to a corner keep depth 1 so
 the deep top/bottom bands own the corner and no box sits inside another.
 
 ### Send policy (new in sucher3)
-- **Mode switch** (UI checkbox / `POST /api/mode {"mode":"event"|"time"}`):
+- **Mode switch** (UI radio group, two buttons, default `Event` /
+  `POST /api/mode {"mode":"event"|"time"}`):
   - `event` (default): one UDP packet per new camera picture.
   - `time`: packets are emitted at **Send-FPS** independent of the camera
     (UI slider 0.2–5 → `POST /api/sendfps {"value":F}`); each new camera

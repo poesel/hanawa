@@ -479,15 +479,17 @@ INDEX_HTML = r"""<!DOCTYPE html>
       </label>
       <br/>
       <label title="0 = Stripe completely off (black frames are sent). 1..100 = camera color scaled by this %, wide slider for 1% aiming">Brightness (%):
-        <input type="range" id="bright" min="0" max="100" value="100"
+        <input type="range" id="bright" min="0" max="100" value="10"
                step="1" style="width:260px;">
       </label>
-      <span id="brightVal">100 %</span>
+      <span id="brightVal">10 %</span>
       <br/>
-      <label title="unchecked (Event-Mode): the Sucher sends one UDP packet to the Leuchter per new camera image. checked (Time-Mode): UDP packets are sent at a constant rate (Send-FPS); each new image only updates the color TARGET, the Leuchter blends towards it over Fade seconds.">Send-Mode
-        (⬜=Event: packet per image | ✅=Time: constant rate):
-        <input type="checkbox" id="modeTime">
-      </label>
+      <span title="the two radio buttons are one group: exactly one is always checked">Send-Mode (default Event):</span>
+      <label for="modeEvent"><input type="radio" name="mode" id="modeEvent"
+             checked> Event (one UDP packet per new image)</label>
+      <label for="modeTime"><input type="radio" name="mode" id="modeTime">
+             Time (constant Send-FPS rate, new images only move the color
+             target the Leuchter blends to)</label>
       <span id="modeVal">Event-Mode</span>
       <br/>
       <label title="Time-Mode only: how many UDP packets per second the Leuchter receives regardless of the camera rate">Send-FPS (Time-Mode only):
@@ -691,18 +693,31 @@ INDEX_HTML = r"""<!DOCTYPE html>
     setInterval(() => {
       pushSendFps(sendfpsInput.value);
       pushFade(fadeInput.value);
+      pushMode();
     }, 4000);
 
-    function pushMode(on) {
-      const m = on ? 'time' : 'event';
+    function pushMode() {
+      // the radio group decides: whichever of the two is checked
+      const m = document.getElementById('modeTime').checked
+                ? 'time' : 'event';
       fetch('/api/mode', { method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode: m }) })
         .then(r => r.json()).then(console.log).catch(console.error);
     }
-    const modeChk = document.getElementById('modeTime');
-    modeChk.addEventListener('click',
-      () => pushMode(modeChk.checked));
+    const modeTime = document.getElementById('modeTime');
+    const modeEvent = document.getElementById('modeEvent');
+    // checking one radio unchecks the other, so 'change' fires on BOTH
+    // inputs per click -> push once, the second event is a no-op
+    let lastMode = null;
+    function pushModeOnce() {
+      const m = modeTime.checked ? 'time' : 'event';
+      if (m === lastMode) return;
+      lastMode = m;
+      pushMode();
+    }
+    [modeTime, modeEvent].forEach(el =>
+      el.addEventListener('change', pushModeOnce));
   </script>
 </body>
 </html>
