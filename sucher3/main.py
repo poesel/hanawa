@@ -40,9 +40,13 @@ DEFAULTS = {
     "points": None,            # set via UI/config; 4 pts in FRAME space
     "hSeg": 40,                # 128-LED stripe: 40 top + 40 bottom
     "vSeg": 26,                # 24 + 24 on the sides
-    "brightness": 5,           # percent, 0 = off - 5 % is enough on this
-                               # stripe: the LEDs sit right behind the TV and
-                               # 5 % already lights the room evenly
+    "brightness": 10,          # percent, 0 = off. This is the honest-color
+                               # equivalent of sucher2's 5 %: that sketch
+                               # doubled every RMS channel (its step
+                               # correction squared the mean), so its 5 %
+                               # sent what 10 % of the true values sends
+                               # here. Below ~8 % the triplets fall to 4..12
+                               # of 255 and the stripe reads as off
     "sendFps": 1.0,            # time-mode: how many UDP packets per second
                                # go to the Leuchter (its own constant rate,
                                # independent of the camera rate)

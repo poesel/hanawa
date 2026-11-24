@@ -63,11 +63,15 @@ class HyperionSender:
             self.failed += 1
             return False
 
+        # Brightness scaling (0..100 %) rounds instead of truncating: at low
+        # percentages floor() throws away the low channels first, which shifts
+        # the hue (a channel of 19 at 5 % is 0.95 -> 1 rounded but 0 = black
+        # truncated). 0 % still sends black, so 'off' keeps working.
         pct = self.brightness
         pkt = bytearray(b"\xAA\x00\xFF\x00")
         for (r, g, b) in colors:
-            pkt += bytes(((r * pct) // 100, (g * pct) // 100,
-                         (b * pct) // 100))
+            pkt += bytes(((r * pct + 50) // 100, (g * pct + 50) // 100,
+                          (b * pct + 50) // 100))
         if fadeMs:
             pkt.append(max(1, min(255, int(round(fadeMs / 50)))))
         pkt[3] = sum(pkt[0:3] + pkt[4:]) & 0xFF

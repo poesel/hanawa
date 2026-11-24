@@ -52,6 +52,14 @@ anything mid-bright to 255 (a green pitch at ~150/200/150 arrived as
 white) and the stripe followed nothing. The plain RMS is the honest
 mean-square value and keeps the colors distinguishable.
 
+That also re-calibrates the brightness slider: sucher2 looked fine at 5 %
+because those were 5 % of the **doubled** values, i.e. 10 % of the honest
+ones. Measured live on the Pi: at 5 % the sent triplets were only 4..12 of
+255 and the wall ring right around the TV stayed as dark as with the stripe
+off, at 100 % the same ring lit up — so the default is 10 % now, and the
+sender rounds (`(v * pct + 50) // 100`) instead of truncating so the low
+channels keep their hue.
+
 ## Running on the Pi
 ```bash
 sudo apt install python3-opencv v4l-utils   # Pillow via python3-pillow usually built-in
@@ -63,13 +71,15 @@ python3 main.py --leuchter 192.168.0.40   # sender test against a catcher
 ```
 Open `http://<pi-ip>:8080/` — same UI as sucher2: snapshot polling, click
 4 corners (TL, TR, BR, BL), `hSeg`/`vSeg` (default 40/26 = 128-LED
-stripe), brightness slider 0–100 % in 1 % steps (5 % is enough on this
-stripe — the LEDs sit right behind the TV), wide slider for aiming
+stripe), brightness slider 0–100 % in 1 % steps (default 10 % — that is the
+honest-color equivalent of sucher2's 5 %, see the color-math note below;
+below ~8 % the triplets fall to single digits of 255 and the stripe reads as
+off), wide slider for aiming
 (0 = off) → `POST /api/brightness`,
 plus `GET /api/ambilight`, `/api/stats` (uptime + UDP sent/acked/failed +
 brightness). Points, segments and brightness persist to `state.json`.
 The preview boxes are filled with the **true measured color** (not dimmed
-by the LED brightness) so they stay readable at 5 %.
+by the LED brightness) so they stay readable at low brightness.
 The sampling boxes reach 2 window segments into the screen (`depth` in
 `windows.py`, was 1 in sucher2 — the true halo color of an edge lives
 deeper than one band); side boxes adjacent to a corner keep depth 1 so
