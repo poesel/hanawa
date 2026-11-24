@@ -40,7 +40,9 @@ DEFAULTS = {
     "points": None,            # set via UI/config; 4 pts in FRAME space
     "hSeg": 40,                # 128-LED stripe: 40 top + 40 bottom
     "vSeg": 26,                # 24 + 24 on the sides
-    "brightness": 100,         # percent, 0 = off
+    "brightness": 5,           # percent, 0 = off - 5 % is enough on this
+                               # stripe: the LEDs sit right behind the TV and
+                               # 5 % already lights the room evenly
     "sendFps": 1.0,            # time-mode: how many UDP packets per second
                                # go to the Leuchter (its own constant rate,
                                # independent of the camera rate)
@@ -59,11 +61,11 @@ DEFAULTS = {
 # TV-off blackout: while the screen is OFF the Pi sends black frames so the
 # whole stripe goes completely off (instead of a glow from the room reflected
 # off the dark glass).  Two signatures of "off", held for BLACK_HOLD seconds
-# on the RMS colors as they get sent (already doubled by the step correction):
+# on the plain RMS colors as they get sent (no step inflation any more):
 # (a) every window at most BLACK_LEVEL bright, or
-# (b) FLAT WARM WASH: whole stripe varies by <= BLACK_SPREAD, red saturated
-# (mean >= 150 after doubling), green a third to three quarters of red (the
-# PS Eye's IR flood makes green ~ half of red), blue crushed (<= a quarter
+# (b) FLAT WARM WASH: whole stripe varies by <= BLACK_SPREAD, red moderate
+# (mean >= 60 - the PS Eye amplifies the dark room into ~R127), green a
+# third to three quarters of red (its IR flood), blue crushed (<= a quarter
 # of red). Saturated content fails one of these (pure red: no green; pure
 # green: no red; white page: full blue) -> only the room wash matches.
 BLACK_LEVEL = 30
@@ -378,7 +380,7 @@ class ComputeLoop:
         sb = sum(c[2] for c in colors)
         dark = max(vals) <= BLACK_LEVEL
         wash = ((max(vals) - min(vals)) <= BLACK_SPREAD
-                and sr >= 150 * len(colors)
+                and sr >= 60 * len(colors)
                 and 0.3 * sr <= sg <= 0.75 * sr
                 and sb <= 0.25 * sr)
         if dark or wash:
@@ -519,7 +521,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
     let brightnessPct = 100;
     let frameSize = null; // [w,h]
 
-    function scale() { return frameSize ? 640 / frameSize[0] : 1; }
+    function scale() {
+      // frame -> canvas. Prefer the server's frameSize; before the first
+      // /api/ambilight answer fall back to the picture's own size, so the
+      // click corners and the boxes are already in the right place then
+      const f = frameSize ? frameSize[0]
+              : (streamImg.naturalWidth || 640);
+      return 640 / f;
+    }
 
     function updateSnapshot() {
       fetch('/api/snapshot?t=' + Date.now())
@@ -559,8 +568,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
         for (let i = 0; i < colors.length && i < rects.length; i++) {
           const [r, g, b] = colors[i], q = rects[i];
           const x1 = q.x1*s, y1 = q.y1*s, x2 = q.x2*s, y2 = q.y2*s;
-          const f = brightnessPct / 100;   // what the Leuchter gets
-          ctx.fillStyle = `rgb(${Math.round(r*f)}, ${Math.round(g*f)}, ${Math.round(b*f)})`;
+          // the TRUE measured color: the boxes are a diagnostic of what the
+          // windows see, dimming them by the LED brightness made them
+          // unreadable at the 5 % that this stripe actually uses
+          ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
           ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
           ctx.strokeStyle = 'rgba(0,255,0,0.5)'; ctx.lineWidth = 1;
           ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);

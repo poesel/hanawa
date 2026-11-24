@@ -43,6 +43,15 @@ Everything works in the **frame's native pixel space** (webcam: usually
 `"frameSize": [w,h]`, the JS UI converts canvas↔frame with it. Unlike
 sucher2 there is no /2 halving (the Pi has the RAM for it).
 
+## Color math
+`calculate_mean_rgb` keeps the sucher2 RMS (`sqrt(sum(c*c)/n)` over every
+`step`-th pixel) but **drops the sketch's `step*step` factor inside the
+sqrt**: that multiplied by `step` while `pixelCount` only counted the
+sampled pixels, so every channel came in doubled. On the TV that pushed
+anything mid-bright to 255 (a green pitch at ~150/200/150 arrived as
+white) and the stripe followed nothing. The plain RMS is the honest
+mean-square value and keeps the colors distinguishable.
+
 ## Running on the Pi
 ```bash
 sudo apt install python3-opencv v4l-utils   # Pillow via python3-pillow usually built-in
@@ -54,10 +63,13 @@ python3 main.py --leuchter 192.168.0.40   # sender test against a catcher
 ```
 Open `http://<pi-ip>:8080/` — same UI as sucher2: snapshot polling, click
 4 corners (TL, TR, BR, BL), `hSeg`/`vSeg` (default 40/26 = 128-LED
-stripe), brightness slider 0–100 % in 1 % steps, wide slider for aiming
+stripe), brightness slider 0–100 % in 1 % steps (5 % is enough on this
+stripe — the LEDs sit right behind the TV), wide slider for aiming
 (0 = off) → `POST /api/brightness`,
 plus `GET /api/ambilight`, `/api/stats` (uptime + UDP sent/acked/failed +
 brightness). Points, segments and brightness persist to `state.json`.
+The preview boxes are filled with the **true measured color** (not dimmed
+by the LED brightness) so they stay readable at 5 %.
 The sampling boxes reach 2 window segments into the screen (`depth` in
 `windows.py`, was 1 in sucher2 — the true halo color of an edge lives
 deeper than one band); side boxes adjacent to a corner keep depth 1 so
@@ -81,14 +93,12 @@ the deep top/bottom bands own the corner and no box sits inside another.
   recognised in two ways: (a) every sampled window ≤ 30 bright (`BLACK_LEVEL`)
   — fine for cameras without IR flood; or (b) the **flat warm wash** the
   PlayStation Eye produces when the TV is off: the IR sensitivity amplifies
-  the dark room into an almost uniform ~R127/G64/B2 over the *whole* frame,
-  which the RMS sampler reports as an all-equal stripe at ~254/128/2 (doubled
-  by the step correction). The rule (`BLACK_SPREAD`): stripe varies ≤ 15, mean
-  red ≥ 150, green 0.3…0.75× red, blue ≤ 0.25× red. Saturated content fails
-  one of these (pure red: no green; green: no red; white: full blue) — so it
-  does not mistaken real scenes for the wash. The UI status line shows
-  "TV off: LEDs out" (`/api/stats` `blackout`), `/api/ambilight` still shows
-  the real measurement.
+  the dark room into an almost uniform ~R127/G64/B2 over the *whole* frame.
+  The rule (`BLACK_SPREAD`): stripe varies ≤ 15, mean red ≥ 60, green 0.3…0.75×
+  red, blue ≤ 0.25× red. Saturated content fails one of these (pure red: no
+  green; green: no red; white: full blue) — so it does not mistaken real
+  scenes for the wash. The UI status line shows "TV off: LEDs out"
+  (`/api/stats` `blackout`), `/api/ambilight` still shows the real measurement.
 - **Camera fps** is measured (exp. moving average over successful grabs)
   and shown in the UI status line + reported by `/api/stats` as
   `cameraFps` (plus `sendFps`, `fadeMs`, `mode`).
@@ -97,12 +107,16 @@ the deep top/bottom bands own the corner and no box sits inside another.
 - Works with any model the kernel shows as `/dev/videoN` (UVC). When you
   know the model: check `v4l2-ctl --list-devices` and its supported
   sizes with `v4l2-ctl --device=/dev/video0 --list-formats-ext`.
-- Backends auto-selected, first that works wins: **OpenCV**
-  (`cv2.VideoCapture`, persistent → true webcam fps), v4l2-ctl
-  `--capture-mjpeg` stream, per-call `v4l2-ctl --to-jpg`, `ffmpeg -f
-  v4l2`. On the Pi below, OpenCV was the one that worked (it also
-  handles the gspca compressed-JPEG pipeline here); the Pi's `v4l2-ctl`
-  has no capture options and `ffmpeg -f v4l2` fails on this cam.
+- Backends auto-selected, first that works wins: **raw Bayer stream**
+  (`v4l2-ctl --stream-mmap` + numpy, the PS Eye's case: gspca streams its
+  native 640x480 even when the format list offers 320x240 first, so the
+  frame size is MEASURED once and the Bayer 2x2 blocks decimated), then
+  OpenCV (`cv2.VideoCapture`), ffmpeg raw stream, v4l2-ctl streams,
+  per-call `v4l2-ctl --to-jpg`. The Pi's `v4l2-ctl` has no capture
+  options and `ffmpeg -f v4l2` fails on this cam.
+- The `/dev/videoN` slot is not stable across boots (a Pi reboot moved
+  the PS Eye from video1 to video0), so `main.py` resolves the wanted
+  device against `v4l2-ctl --list-devices` and follows the real USB cam.
 - Grab rate (`--fps`, default 4) is the *camera* rate; the packet rate
   to the Leuchter is the `sendFps` slider in time mode.
 - The ack trick: the Leuchter sends `0x80` back to the sender IP on

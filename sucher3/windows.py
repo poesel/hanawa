@@ -91,9 +91,16 @@ def calculate_ambilight_windows(top_left, top_right, bot_left, bot_right,
 
 
 def calculate_mean_rgb(px, width, height, x1, y1, x2, y2, step=2):
-    """RMS-mean over the rect, sampling every `step`-th pixel - identical
-    math to calculateMeanRGB in windows.cpp, vectorized with numpy.
-    `px` is an RGB ndarray (H,W,3)."""
+    """RMS-mean over the rect, sampling every `step`-th pixel.
+
+    Same RMS as calculateMeanRGB in windows.cpp, but WITHOUT its
+    "step-Korrektur": the sketch multiplied by step*step INSIDE the sqrt
+    while pixelCount only counted the SAMPLED pixels, so every channel got
+    inflated by exactly `step` (x2 at step=2). On the TV that saturates
+    anything mid-bright - a green pitch at ~150/200/150 arrives as
+    255/255/255 white and the stripe follows nothing. The plain RMS
+    sqrt(sum/n) is the honest mean-square value and keeps the colors
+    distinguishable."""
     x1 = constrain(int(x1), 0, width - 1)
     x2 = constrain(int(x2), 0, width - 1)
     y1 = constrain(int(y1), 0, height - 1)
@@ -106,10 +113,7 @@ def calculate_mean_rgb(px, width, height, x1, y1, x2, y2, step=2):
     if n == 0:
         return (128, 128, 128)
     ssq = (sub.astype(np.int64) ** 2).sum(axis=(0, 1))
-    # "step-Korrektur" exactly like the sketch: sqrt(step^2 * sum / n)
-    k = step * step
-    return tuple(min(255, int(math.sqrt(k * int(s) / n) + 0.5))
-                 for s in ssq)
+    return tuple(min(255, int(math.sqrt(int(s) / n) + 0.5)) for s in ssq)
 
 
 def sample_colors(px, width, height, rects):
