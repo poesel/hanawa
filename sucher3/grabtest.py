@@ -85,6 +85,27 @@ if __name__ == "__main__":
     else:
         print("V4L2 devices:", glob.glob("/dev/video*"))
         show("v4l2 tools?", run(["v4l2-ctl", "--list-devices"], 15))
+        show("formats (alt 0 first)", run(["v4l2-ctl", f"--device={device}",
+                                          "--list-formats-ext"], 15))
+        # backend 0: native raw V4L2 stream (Bayer GRBG cams, PS Eye style)
+        g = WebcamGrabber(device, size)
+        t0 = time.time()
+        ok = 0
+        first = None
+        for i in range(10):
+            d = g.grab_bayer(timeout=8)
+            if d is not None:
+                ok += 1
+                first = first if first is not None else d
+        dt = time.time() - t0
+        print(f"  v4l2-ctl bayer raw stream: {ok}/10 frames in {dt:.1f}s "
+              f"-> {ok / dt:.1f} fps")
+        report_frame("bayer frame", first)
+        if ok:
+            # bayer works -> that is what the daemon will use; probing the
+            # other backends now would fight over the device with the
+            # stream still running
+            sys.exit(0)
         # backend 1: OpenCV persistent capture, measure 10 frames
         try:
             import cv2  # noqa

@@ -3,9 +3,9 @@
 One UDP datagram per frame to LEUCHTER_IP:1900:
   [0] 0xAA [1] 0x00 [2] 0xFF [3] checksum (low byte of sum of bytes[0..2]
       + all color bytes + optional fade byte) [4..] RGB triplets, LED 0..n-1
-  optional tail byte [4+3n] = FADE in units of 100 ms (1..255 = 0.1 s ..
-      25.5 s, 0/absent = instant): the LEUCHTER animates current -> new
-      colors itself, no need to stream the whole fade over the wire.
+  optional tail byte [4+3n] = FADE duration in units of 50 ms (1..255 =
+      50 ms .. 12.75 s, 0/absent = instant): the LEUCHTER animates current
+      -> new colors itself, no need to stream the whole fade over the wire.
 
 Packing (final stripe mount, LED 0 at TOP RIGHT, clockwise):
   Right (top->bottom), Bottom (right->left reversed),
@@ -48,10 +48,11 @@ class HyperionSender:
     def set_brightness(self, percent):
         self.brightness = max(0, min(100, int(percent)))
 
-    def send_frame(self, colors, fade100ms=0):
+    def send_frame(self, colors, fadeMs=0):
         """colors: list of (r,g,b) in sucher2's clockwise order (see header).
-        fade100ms: optional tail byte in units of 100 ms (1..255) -> the
-        LEUCHTER fades current->new itself; 0 = old wire format, instant.
+        fadeMs: optional fade duration; the tail byte carries it in units of
+        50 ms (round up to at least 1, max 255 = 12.75 s) -> the LEUCHTER
+        fades current->new itself; 0 = old wire format, instant.
         Returns True if the datagram was sent."""
         n = len(colors)
         if n <= 0:
@@ -67,8 +68,8 @@ class HyperionSender:
         for (r, g, b) in colors:
             pkt += bytes(((r * pct) // 100, (g * pct) // 100,
                          (b * pct) // 100))
-        if fade100ms:
-            pkt.append(max(1, min(255, int(fade100ms))))
+        if fadeMs:
+            pkt.append(max(1, min(255, int(round(fadeMs / 50)))))
         pkt[3] = sum(pkt[0:3] + pkt[4:]) & 0xFF
 
         try:

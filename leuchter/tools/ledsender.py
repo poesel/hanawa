@@ -59,7 +59,7 @@ def parse_hex(s):
 
 def build_frame(leds, fade_byte=0):
     """Hyperion UDP LED frame: AA 00 FF <checksum> + RGB per LED (+ optional
-    trailing fade byte: 100 ms units the LEUCHTER interpolates over, 0 = none)."""
+    trailing fade byte: 50 ms units the LEUCHTER interpolates over, 0 = none)."""
     payload = b""
     for (r, g, b) in leds:
         payload += bytes((r, g, b))
@@ -368,11 +368,11 @@ def menu(st, log, key):
             try:
                 sec = float(parts[1])
                 if not 0.0 <= sec <= 25.5:
-                    raise SystemExit("fade-sec must be 0..25.5 s")
-                st["fade"] = int(round(sec * 10))
+                    raise SystemExit("fade-sec must be 0..12.75 s")
+                st["fade"] = int(round(sec * 20))
                 print(f"fade = {sec:g}s on the leuchter (wire byte {st['fade']})")
             except (IndexError, ValueError):
-                print("usage: fade-sec <seconds 0..25.5>")
+                print("usage: fade-sec <seconds 0..12.75>")
         elif cmd in PATTERNS:
             if run_pattern(cmd, parts[1:], st, log, key):
                 print(f"(the {key.key} stopped this pattern)")
@@ -417,14 +417,14 @@ def main():
 
     if not 1 <= a.leds <= MAX_LEDS:
         raise SystemExit(f"--leds must be 1..{MAX_LEDS}")
-    if not 0.0 <= a.fade <= 25.5:
-        raise SystemExit("--fade must be 0..25.5 seconds")
+    if not 0.0 <= a.fade <= 12.75:
+        raise SystemExit("--fade must be 0..12.75 seconds")
 
     log = PktLog(None if a.logfile == "-" else a.logfile)
 
     st = {"host": a.host or "127.0.0.1", "port": a.port, "leds": a.leds,
           "fps": a.fps, "loop": a.loop, "frames": a.frames, "dry": a.dry,
-          "fade": int(round(a.fade * 10)),  # wire byte: units of 100 ms
+          "fade": int(round(a.fade * 20)),  # wire byte: units of 50 ms
           "retries": max(0, a.retries), "sender": None,
           "sent": 0, "acked": 0, "missed": 0, "lat_sum": 0.0, "lat_max": 0.0}
     if not a.dry:

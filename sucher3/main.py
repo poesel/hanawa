@@ -19,6 +19,7 @@ Usage:
   python3 main.py --leuchter 192.168.0.40   # test sender against udpcatch
 """
 import json
+import os
 import socket
 import subprocess
 import threading
@@ -43,15 +44,31 @@ DEFAULTS = {
     "sendFps": 1.0,            # time-mode: how many UDP packets per second
                                # go to the Leuchter (its own constant rate,
                                # independent of the camera rate)
-    "fadeSeconds": 0,          # fade duration in SECONDS (0..10): the
-                               # LEUCHTER blends from its current colors to
-                               # the received ones over this time (protocol
-                               # tail byte in 100 ms units). 0 = instant.
+    "fadeMs": 0,               # fade duration in ms (0..1000, UI steps of
+                               # 50 ms): the LEUCHTER blends from its current
+                               # colors to the received ones over this time
+                               # (protocol tail byte in 50 ms units, so max
+                               # 255 = 12.75 s in the protocol; the UI caps
+                               # the slider at 1 s). 0 = instant.
                                # Works in BOTH modes.
     "mode": "event",           # "event": one packet per new camera frame
                                # "time": packets at sendFps (re-emitting the
                                # newest measurement; Leuchter does the fade)
 }
+
+# TV-off blackout: while the screen is OFF the Pi sends black frames so the
+# whole stripe goes completely off (instead of a glow from the room reflected
+# off the dark glass).  Two signatures of "off", held for BLACK_HOLD seconds
+# on the RMS colors as they get sent (already doubled by the step correction):
+# (a) every window at most BLACK_LEVEL bright, or
+# (b) FLAT WARM WASH: whole stripe varies by <= BLACK_SPREAD, red saturated
+# (mean >= 150 after doubling), green a third to three quarters of red (the
+# PS Eye's IR flood makes green ~ half of red), blue crushed (<= a quarter
+# of red). Saturated content fails one of these (pure red: no green; pure
+# green: no red; white page: full blue) -> only the room wash matches.
+BLACK_LEVEL = 30
+BLACK_SPREAD = 15
+BLACK_HOLD = 1.0
 
 STATE = {
     "config": dict(DEFAULTS),
@@ -63,6 +80,8 @@ STATE = {
     "cam_fps": None,           # exp. moving average of the camera grab rate
     "cam_last": None,          # time of the previous successfully grabbed frame
     "last_colors": None,       # newest measured colors (time-mode re-emits)
+    "blackSince": None,        # start time of the current all-dark streak
+    "blackout": False,         # TV-off detected -> black frames get sent
 }
 LOCK = threading.Lock()
 
@@ -95,8 +114,9 @@ class AmbilightStateHandler(SimpleHTTPRequestHandler):
                 "udp": dict(sender.stats() if sender else {}),
                 "cameraFps": round(cam, 2) if cam else None,
                 "sendFps": cfg["sendFps"],
-                "fadeSeconds": cfg["fadeSeconds"],
+                "fadeMs": cfg["fadeMs"],
                 "mode": cfg["mode"],
+                "blackout": STATE["blackout"],
             })
         else:
             self.send_error(404)
@@ -130,14 +150,14 @@ class AmbilightStateHandler(SimpleHTTPRequestHandler):
                 self.send_json(200, {"status": "ok", "sendFps": v})
         elif route == "/api/fade":
             v = parse_value(body)
-            if v is None or not (0 <= v <= 10):
-                self.send_json(400, {"error": "fade needs int 0..10 (s)"})
+            if v is None or not (0 <= v <= 1000):
+                self.send_json(400, {"error": "fade needs ms 0..1000 (steps of 50)"})
             else:
                 with LOCK:
-                    STATE["config"]["fadeSeconds"] = int(v)
+                    STATE["config"]["fadeMs"] = int(v)
                 save_state()
                 self.send_json(200, {"status": "ok",
-                                     "fadeSeconds": int(v)})
+                                     "fadeMs": int(v)})
         elif route == "/api/mode":
             m = (body.get("mode") or body.get("value")
                  if isinstance(body, dict) else body)
@@ -162,6 +182,7 @@ class AmbilightStateHandler(SimpleHTTPRequestHandler):
     def send_bytes(self, code, ctype, data):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -284,7 +305,7 @@ SENDER = HyperionSender()  # (re)created in main() with the CLI args
 
 
 # NOTE: no client-side fader anymore since the fade became a PROTOCOL
-# feature: every datagram carries a fade byte (units of 100 ms) and the
+# feature: every datagram carries a fade byte (units of 50 ms) and the
 # Leuchter interpolates cur -> new on its own 40 ms timer. The Pi only
 # keeps the latest measured colors so time-mode can re-emit them.
 
@@ -340,11 +361,41 @@ class ComputeLoop:
         colors = (list(rightc) + list(reversed(bottomc))
                   + list(reversed(leftc)) + list(topc))
 
-        # the fade lives in the PROTOCOL now: both modes send the fade byte
-        # (seconds x 10 = units of 100 ms), the Leuchter animates the mix
-        fade = int(cfg["fadeSeconds"])
+        # TV-off blackout (see BLACK_LEVEL/BLACK_SPREAD): while the screen is
+        # dark, the SENT colors are forced black. 'result' keeps the real
+        # measurement so the UI overlay still shows the truth.
+        # Values here are RMS-means already DOUBLED by the sketch's step
+        # correction, so "off" is recognised as: (a) truly dark everywhere,
+        # or (b) the FLAT WARM WASH of the PlayStation Eye pointing at a
+        # dark TV: red saturated (>=150 after doubling), green ~half of it
+        # (IR!), blue crushed (<= a quarter of red) and the whole stripe
+        # barely varying. Saturated content (red scene: no green; green
+        # scene: no red; white page: lots of blue) fails one of these.
+        now = time.time()
+        vals = [max(c) for c in colors]
+        sr = sum(c[0] for c in colors)
+        sg = sum(c[1] for c in colors)
+        sb = sum(c[2] for c in colors)
+        dark = max(vals) <= BLACK_LEVEL
+        wash = ((max(vals) - min(vals)) <= BLACK_SPREAD
+                and sr >= 150 * len(colors)
+                and 0.3 * sr <= sg <= 0.75 * sr
+                and sb <= 0.25 * sr)
+        if dark or wash:
+            if STATE["blackSince"] is None:
+                STATE["blackSince"] = now
+            if now - STATE["blackSince"] >= BLACK_HOLD:
+                colors = [(0, 0, 0)] * len(colors)
+                STATE["blackout"] = True
+        else:
+            STATE["blackSince"] = None
+            STATE["blackout"] = False
+
+        # the fade lives in the PROTOCOL now: both modes send the fade tail
+        # byte (50 ms units); the Leuchter animates cur -> new itself
+        fade = int(cfg["fadeMs"])
         if cfg["mode"] == "event":
-            SENDER.send_frame(colors, fade100ms=fade * 10)
+            SENDER.send_frame(colors, fadeMs=fade)
             SENDER.poll_ack()
         else:
             # time mode: only remember the newest measurement, the sender
@@ -379,8 +430,8 @@ def sender_loop():
                 with LOCK:
                     colors = STATE["last_colors"]
                 if colors:
-                    fade = int(STATE["config"]["fadeSeconds"])
-                    SENDER.send_frame(list(colors), fade100ms=fade * 10)
+                    fade = int(STATE["config"]["fadeMs"])
+                    SENDER.send_frame(list(colors), fadeMs=fade)
                     SENDER.poll_ack()
         except Exception as e:  # never kill the loop
             print(f"[sender] {e}")
@@ -403,7 +454,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 </head>
 <body>
   <h1>sucher3 Live View (webcam via V4L2) - v2</h1>
-  <div id="camstats" style="font:12px monospace; margin-top:4px;">cam fps: – | mode: event | send: 1 fps | fade: 0 s (Leuchter)</div>
+  <div id="camstats" style="font:12px monospace; margin-top:4px;">cam fps: – | mode: event | send: 1 fps | fade: 0 ms (Leuchter)</div>
   <div id="stream-container">
     <img id="stream" width="640" height="480"/>
     <canvas id="overlay" width="640" height="480"></canvas>
@@ -421,9 +472,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
         <input type="number" id="vSeg" value="26" min="1" style="width:60px;">
       </label>
       <br/>
-      <label title="0 = Stripe completely off (black frames are sent)">Brightness (%):
+      <label title="0 = Stripe completely off (black frames are sent). 1..100 = camera color scaled by this %, wide slider for 1% aiming">Brightness (%):
         <input type="range" id="bright" min="0" max="100" value="100"
-               step="5" style="width:120px;">
+               step="1" style="width:260px;">
       </label>
       <span id="brightVal">100 %</span>
       <br/>
@@ -439,11 +490,11 @@ INDEX_HTML = r"""<!DOCTYPE html>
       </label>
       <span id="sendFpsVal">1 fps</span>
       <br/>
-      <label title="fade happens on the LEUCHTER (protocol byte, works in BOTH modes): the stripe interpolates from its current colors to the received ones over this many seconds, 0 = jump instantly">Fade (s, Leuchter):
-        <input type="range" id="fade" min="0" max="10" value="0"
-               step="1" style="width:120px;">
+      <label title="fade happens on the LEUCHTER (protocol byte, works in BOTH modes): the stripe interpolates from its current colors to the received ones over this many milliseconds (steps of 50 ms), 0 = jump instantly">Fade (ms, Leuchter):
+        <input type="range" id="fade" min="0" max="1000" value="0"
+               step="50" style="width:260px;">
       </label>
-      <span id="fadeVal">0 s</span>
+      <span id="fadeVal">0 ms</span>
     </div>
 
     <button id="reset" style="margin-top:10px;">Punkte zurückseet</button>
@@ -584,13 +635,14 @@ INDEX_HTML = r"""<!DOCTYPE html>
     function fetchStats() {
       fetch('/api/stats').then(r => r.json()).then(d => {
         camStats.textContent =
-          `cam fps: ${d.cameraFps ?? '-'} | mode: ${d.mode} | send: ${d.sendFps} fps | fade: ${d.fadeSeconds} s (Leuchter)`;
+          `cam fps: ${d.cameraFps ?? '-'} | mode: ${d.mode} | send: ${d.sendFps} fps | fade: ${d.fadeMs} ms (Leuchter)` +
+          (d.blackout ? ' | TV off: LEDs out' : '');
         // the small labels beside the controls always show what the
         // SERVER has - if you drag a slider and this number follows,
         // the value made it to the daemon
         brightVal.textContent = `${d.udp.brightness} %`;
         sendFpsVal.textContent = `${d.sendFps} fps`;
-        fadeVal.textContent = `${d.fadeSeconds} s`;
+        fadeVal.textContent = `${d.fadeMs} ms`;
         modeVal.textContent = d.mode === 'time'
           ? 'Time-Mode (constant rate)' : 'Event-Mode (per image)';
       }).catch(console.error);
@@ -661,13 +713,43 @@ def load_state():
 def save_state():
     with LOCK:
         cfg = {k: STATE["config"][k] for k in ("points", "hSeg", "vSeg",
-                "sendFps", "fadeSeconds", "mode")}
+                "sendFps", "fadeMs", "mode")}
     cfg["brightness"] = SENDER.brightness
     try:
         with open("state.json", "w") as f:
             json.dump(cfg, f)
     except OSError:
         pass
+
+
+def resolve_device(wanted):
+    """The /dev/videoN slot of a cam changes when the Pi reboots or another
+    cam is plugged (the PS Eye was video1 next to the QuickCam, video0 alone)
+    - so a missing slot gets resolved via v4l2-ctl --list-devices: the first
+    node of the first REAL USB camera block (platform nodes like bcm2835-*
+    are not cameras at all)."""
+    if os.path.exists(wanted):
+        return wanted
+    try:
+        out = subprocess.run(["v4l2-ctl", "--list-devices"],
+                             capture_output=True, timeout=10)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return wanted
+    header = None
+    for line in out.stdout.decode(errors="ignore").splitlines():
+        if line.strip() and not line.startswith(("\t", " ")):
+            header = line.strip()
+            if any(t in header.lower() for t in ("bcm2835", "vchiq", "platform",
+                                                 "mmal", "codec", "isp")):
+                header = None      # not a camera -> skip its nodes
+            continue
+        if header and "/dev/video" in line:
+            found = line.strip()
+            print(f"[main] {wanted} is gone -> using {found} "
+                  f"(camera '{header}')")
+            return found
+    print(f"[main] {wanted} is gone and no USB camera found, keeping it")
+    return wanted
 
 
 def main():
@@ -705,6 +787,10 @@ def main():
 
     load_state()
 
+    # the /dev/videoN slot may have moved (Pi reboot / other cam) -> follow
+    # the real USB camera instead of dying silently
+    args.device = resolve_device(args.device)
+
     if args.set_ctrl:
         try:
             subprocess.run(["v4l2-ctl", f"--device={args.device}",
@@ -718,7 +804,7 @@ def main():
               "ptp": Gphoto2Grabber(),
               "synth": SyntheticGrabber(),
               "off": None}[args.source]
-    print(f"[main] source={args.source} size={args.size or 'cam default'} "
+    print(f"[main] source={args.source} device={args.device} size={args.size or 'cam default'} "
           f"leuchter={SENDER.leuchter_ip}:{SENDER.port} "
           f"http=:{args.http_port}")
 

@@ -54,9 +54,14 @@ python3 main.py --leuchter 192.168.0.40   # sender test against a catcher
 ```
 Open `http://<pi-ip>:8080/` — same UI as sucher2: snapshot polling, click
 4 corners (TL, TR, BR, BL), `hSeg`/`vSeg` (default 40/26 = 128-LED
-stripe), brightness slider 0–100 % (0 = off) → `POST /api/brightness`,
+stripe), brightness slider 0–100 % in 1 % steps, wide slider for aiming
+(0 = off) → `POST /api/brightness`,
 plus `GET /api/ambilight`, `/api/stats` (uptime + UDP sent/acked/failed +
 brightness). Points, segments and brightness persist to `state.json`.
+The sampling boxes reach 2 window segments into the screen (`depth` in
+`windows.py`, was 1 in sucher2 — the true halo color of an edge lives
+deeper than one band); side boxes adjacent to a corner keep depth 1 so
+the deep top/bottom bands own the corner and no box sits inside another.
 
 ### Send policy (new in sucher3)
 - **Mode switch** (UI checkbox / `POST /api/mode {"mode":"event"|"time"}`):
@@ -64,14 +69,29 @@ brightness). Points, segments and brightness persist to `state.json`.
   - `time`: packets are emitted at **Send-FPS** independent of the camera
     (UI slider 0.2–5 → `POST /api/sendfps {"value":F}`); each new camera
     measurement only updates the color *target*, the sender re-emits it.
-- **Fade slider 0–10 s** (`POST /api/fade {"value":N}`) — works in **both**
-  modes: the fade is now a PROTOCOL feature, every datagram carries a tail
-  byte (duration in 100 ms units) and the LEUCHTER interpolates from its
-  current colors to the received ones over that many seconds on its own
-  40 ms timer. The Pi sends no intermediate frames. 0 = instant.
+- **Fade slider 0–1000 ms in steps of 50 ms** (`POST /api/fade {"value":MS}`)
+  — works in **both** modes: the fade is a PROTOCOL feature, every datagram
+  carries a tail byte (duration in **50 ms** units, protocol max 255 =
+  12.75 s, the UI slider caps at 1 s) and the LEUCHTER interpolates from its
+  current colors to the received ones on its own 40 ms timer. The Pi sends
+  no intermediate frames. 0 = instant.
+- **TV-off blackout**: while the screen is off the Pi sends black frames, so
+  the whole stripe goes completely off (instead of a glow from the room
+  reflected in the dark glass). "Off" is held for 1 s (`BLACK_HOLD`) and
+  recognised in two ways: (a) every sampled window ≤ 30 bright (`BLACK_LEVEL`)
+  — fine for cameras without IR flood; or (b) the **flat warm wash** the
+  PlayStation Eye produces when the TV is off: the IR sensitivity amplifies
+  the dark room into an almost uniform ~R127/G64/B2 over the *whole* frame,
+  which the RMS sampler reports as an all-equal stripe at ~254/128/2 (doubled
+  by the step correction). The rule (`BLACK_SPREAD`): stripe varies ≤ 15, mean
+  red ≥ 150, green 0.3…0.75× red, blue ≤ 0.25× red. Saturated content fails
+  one of these (pure red: no green; green: no red; white: full blue) — so it
+  does not mistaken real scenes for the wash. The UI status line shows
+  "TV off: LEDs out" (`/api/stats` `blackout`), `/api/ambilight` still shows
+  the real measurement.
 - **Camera fps** is measured (exp. moving average over successful grabs)
   and shown in the UI status line + reported by `/api/stats` as
-  `cameraFps` (plus `sendFps`, `fadeSeconds`, `mode`).
+  `cameraFps` (plus `sendFps`, `fadeMs`, `mode`).
 
 ## Webcam / V4L2 notes
 - Works with any model the kernel shows as `/dev/videoN` (UVC). When you

@@ -19,12 +19,21 @@ def constrain(v, lo, hi):
 
 
 def calculate_ambilight_windows(top_left, top_right, bot_left, bot_right,
-                                xwindows, ywindows):
+                                xwindows, ywindows, depth=2):
     """Returns (topRects, bottomRects, leftRects, rightRects).
 
-    Each rect is a dict {"x1","y1","x2","y2"}. Same arithmetic as the C++
-    version (including the round() quirks and the corner-skip on the
-    vertical sides: i runs from 1 .. ywindows-2).
+    Each rect is a dict {"x1","y1","x2","y2"}. Base arithmetic is the C++
+    version (round() quirks kept, corner-skip on the vertical sides: i
+    runs from 1 .. ywindows-2), with one deliberate change:
+
+    `depth` = how far the sampling boxes reach INTO the screen, in units
+    of one window segment. depth=1 was the sucher2 geometry; the real
+    halo color of an edge lives deeper than one segment, so we default to
+    2 (boxes reach twice as far in). The boxes overlap more at the four
+    corners then - handled here: the side rects adjacent to the top/bottom
+    corner bands are one segment SHALLOWER, so the deep top/bottom bands
+    own the corner area and no window's sample region is contained in its
+    neighbour's.
     """
     topRects, bottomRects, leftRects, rightRects = [], [], [], []
 
@@ -42,33 +51,37 @@ def calculate_ambilight_windows(top_left, top_right, bot_left, bot_right,
     # half-to-even, so use this helper for all int conversions:
     rnd = lambda v: math.floor(v + 0.5) if v >= 0 else -math.floor(-v + 0.5)
 
+    def side_depth(i):
+        if i < depth or i > ywindows - 1 - depth:
+            return max(1, depth - 1)
+        return depth
+
     for i in range(xwindows):
         tx1 = top_left[0] + rnd(i * xtopwinwidth)
         ty1 = top_left[1] + rnd(i * topslope)
         tx2 = tx1 + rnd(xtopwinwidth)
-        ty2 = ty1 + (1.0 - (i / (xwindows - 1))) * yleftwinheight + \
-              (i / (xwindows - 1)) * yrightwinheight
+        ty2 = ty1 + depth * ((1.0 - (i / (xwindows - 1))) * yleftwinheight +
+              (i / (xwindows - 1)) * yrightwinheight)
         topRects.append({"x1": tx1, "y1": ty1, "x2": tx2, "y2": int(ty2)})
 
         bx1 = bot_left[0] + rnd(i * xbotwinwidth)
-        by1 = bot_left[1] + rnd(i * bottomslope) - \
-              (1.0 - (i / (xwindows - 1))) * yleftwinheight - \
-              (i / (xwindows - 1)) * yrightwinheight
+        by1 = bot_left[1] + rnd(i * bottomslope) - depth * ((1.0 - (i / (xwindows - 1))) * yleftwinheight +
+              (i / (xwindows - 1)) * yrightwinheight)
         bx2 = bx1 + rnd(xbotwinwidth)
         by2 = bot_left[1] + rnd(i * bottomslope)
         bottomRects.append({"x1": bx1, "y1": int(by1), "x2": bx2, "y2": by2})
 
     for i in range(1, ywindows - 1):
+        sd = side_depth(i)
         lx1 = top_left[0] + rnd(i * leftslope)
         ly1 = top_left[1] + rnd(i * yleftwinheight)
-        lx2 = lx1 + (1.0 - (i / (ywindows - 1))) * xtopwinwidth + \
-              (i / (ywindows - 1)) * xbotwinwidth
+        lx2 = lx1 + sd * ((1.0 - (i / (ywindows - 1))) * xtopwinwidth +
+              (i / (ywindows - 1)) * xbotwinwidth)
         ly2 = ly1 + rnd(yleftwinheight)
         leftRects.append({"x1": lx1, "y1": ly1, "x2": int(lx2), "y2": ly2})
 
-        rx1 = top_right[0] + rnd(i * rightslope) - \
-              (1.0 - (i / (ywindows - 1))) * xtopwinwidth - \
-              (i / (ywindows - 1)) * xbotwinwidth
+        rx1 = top_right[0] + rnd(i * rightslope) - sd * ((1.0 - (i / (ywindows - 1))) * xtopwinwidth +
+                  (i / (ywindows - 1)) * xbotwinwidth)
         ry1 = top_right[1] + rnd(i * yrightwinheight)
         rx2 = top_right[0] + rnd(i * rightslope)
         ry2 = ry1 + rnd(yrightwinheight)
@@ -109,4 +122,11 @@ if __name__ == "__main__":
     t, b, l, r = calculate_ambilight_windows(
         (25, 25), (295, 25), (25, 215), (295, 215), 40, 26)
     assert (len(t), len(b), len(l), len(r)) == (40, 40, 24, 24)
+    # default depth=2: middle top/bottom boxes reach 2 window rows into
+    # the screen (TV is 190 px tall / 26 rows = 7.3 px per row)...
+    assert t[20]["y2"] - t[20]["y1"] > 12, "top boxes too shallow"
+    # ...while the side boxes ADJACENT to the corners stay 1 segment deep
+    # so they don't reach into the deep corner bands (overlap handling):
+    assert l[0]["x2"] - l[0]["x1"] < 10, "corner side box reaches too deep"
+    assert l[12]["x2"] - l[12]["x1"] > 12, "middle side box too shallow"
     print("windows selftest OK:", len(t) + len(b) + len(l) + len(r), "rects")

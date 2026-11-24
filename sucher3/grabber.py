@@ -43,7 +43,7 @@ class WebcamGrabber:
         if size:
             w, h = size.lower().split("x")
             self.wh = (int(w), int(h))
-        self.backend = None       # "cv2" | "ffstream" | "stream" | "v4l2" | "ffmpeg"
+        self.backend = None       # "bayer" | "cv2" | "ffstream" | "stream" | "v4l2" | "ffmpeg"
         self.cap = None           # persistent cv2 VideoCapture
         self.proc = None          # persistent subprocess stream
         self.buf = b""
@@ -51,6 +51,11 @@ class WebcamGrabber:
         self.cv2_fail = 0
         self.ffwh = None          # ffmpeg raw stream frame size
         self.ffn = None           # bytes per raw frame
+        self.bayer_fmt = None     # probed (ok, [sizes]) of native Bayer stream
+        self.bayer_dead = False   # cam is not Bayer -> fall through chain
+        self.bayer_probe_at = 0.0 # last probe time (retry max every 5 s)
+        self.bayer_wh = None      # native (w,h) of the Bayer stream
+        self.bayer_out = None     # (w,h) of the RGB frame we hand out
 
     def _try_cv2(self):
         """RGB ndarray off a persistent capture (BGR -> RGB view)."""
@@ -123,6 +128,151 @@ class WebcamGrabber:
         self.buf = self.buf[self.ffn:]
         return frame.reshape(h, w, 3).copy()  # rgb8 = already RGB
 
+    # ---- persistent raw V4L2 stream in the cam's NATIVE format -----------
+    # The ffmpeg build on the Pi has no v4l2 INPUT demuxer at all ("Cannot
+    # find format 'v4l2'"), and the Sony PlayStation Eye (PS3 cam, USB
+    # 1415:2000, driver gspca_ov534) offers no MJPEG either - its format is
+    # plain Bayer GRBG sensor bytes. v4l2-ctl --stream-mmap keeps that
+    # stream flowing; we keep only the LATEST frame per poll (the cam does
+    # ~50 fps, the poll much less, so the preview never lags). Sampling
+    # needs no true demosaic: the channel means of a rect live right on the
+    # Bayer planes (GRBG: G at p00/p11, R at p01, B at p10), and the cheap
+    # 2x block upsample below is exact enough for preview + colors.
+    def _bayer_probe(self):
+        """(ok, [(w,h), ...]) of the cam's FIRST format (the stream uses
+        alt 0), or None if the probe itself could not run (device busy/
+        initializing -> retried next poll). A WRONG cam format on the other
+        hand is decided once and for all."""
+        try:
+            out = subprocess.run(["v4l2-ctl", f"--device={self.device}",
+                                  "--list-formats-ext"],
+                                 capture_output=True, timeout=15)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return None
+        if out.returncode != 0:
+            return None
+        txt = out.stdout.decode(errors="ignore")
+        m = re.search(r"\[0\]:\s*'([^']*)'", txt)
+        if not m:
+            return None
+        ok = any(b in m.group(1) for b in ("GRBG", "GBRG", "BGGR", "BAYER"))
+        # only the sizes of format [0] count -> cut off at the next format
+        block = txt.split("[1]:")[0]
+        sizes = [(int(a), int(b)) for a, b in
+                 re.findall(r"Size:\s+Discrete\s+(\d+)x(\d+)", block)]
+        return ok, sizes
+
+    def _bayer_measure(self):
+        """Bytes of ONE frame as the stream really delivers it. The format
+        list's first size entry is NOT what gspca streams (the PS Eye lists
+        320x240 but streams its native 640x480 = 307200 Bayer bytes), and
+        a wrong frame size silently drifts the window by a few hundred
+        bytes per grab -> the preview looks like a jumping enlarged crop.
+        So the size is MEASURED, once, with a single-frame capture."""
+        try:
+            out = subprocess.run(["v4l2-ctl", f"--device={self.device}",
+                                  "--stream-mmap", "--stream-count=1",
+                                  "--stream-to=-"],
+                                 capture_output=True, timeout=20)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return 0
+        return len(out.stdout)
+
+    def _bayer_pick(self, sizes):
+        """(w,h) the stream uses: the measured frame matched against the
+        advertised sizes (largest wins if the measure came back odd)."""
+        n = self._bayer_measure()
+        for (w, h) in sorted(sizes or [], key=lambda s: s[0] * s[1],
+                             reverse=True):
+            if w * h == n:
+                return (w, h)
+        if n >= 4096:                       # unlisted but plausible
+            w = int((n * 4 / 3) ** 0.5) & ~1
+            h = (n // w) if w else 0
+            if w and h and w * h == n:
+                return (w, h)
+        return max(sizes, key=lambda s: s[0] * s[1]) if sizes else None
+
+    def _bayer_spawn(self):
+        self.proc = subprocess.Popen(
+            ["v4l2-ctl", f"--device={self.device}", "--stream-mmap",
+             "--stream-to=-", "--stream-count=0"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self.buf = b""
+
+    def _bayer_rgb(self, raw):
+        """GRBG Bayer bytes -> RGB (H,W,3) ndarray. The Bayer 2x2 blocks
+        (G R / G B) collapse to ONE pixel each: that decimation is exact
+        and costs a quarter of the bytes - no demosaic needed for window
+        sampling, and the PS Eye's 640x480 stream lands right on the
+        requested 320x240."""
+        w, h = self.bayer_wh
+        f = np.frombuffer(raw, np.uint8).reshape(h, w)
+        g1, g2 = f[0::2, 0::2], f[1::2, 1::2]
+        r, b = f[0::2, 1::2], f[1::2, 0::2]
+        g = ((g1.astype(np.uint16) + g2.astype(np.uint16)) // 2).astype(np.uint8)
+        return self._fit_size(np.dstack((r, g, b)))
+
+    def _fit_size(self, rgb):
+        """Resize the decimated frame to the requested --size with cheap
+        integer block ops (the common cases are exact: a 640x480 stream
+        decimates to exactly 320x240, or a small stream gets upscaled)."""
+        ih, iw = rgb.shape[:2]
+        want = self.wh
+        if not want or (iw, ih) == want:
+            self.bayer_out = (iw, ih)
+            return rgb
+        ow, oh = want
+        if ow <= iw and ih <= ih and iw % ow == 0 and ih % oh == 0:
+            fy, fx = ih // oh, iw // ow
+            rgb = rgb.reshape(oh, fy, ow, fx, 3).mean(axis=(1, 3))
+            rgb = rgb.astype(np.uint8)
+        elif ow >= iw and oh >= ih and ow % iw == 0 and oh % ih == 0:
+            rgb = np.repeat(np.repeat(rgb, oh // ih, 0), ow // iw, 1)
+        else:
+            rgb = rgb[::max(1, ih // oh), ::max(1, iw // ow)]
+        self.bayer_out = rgb.shape[1::-1]
+        return rgb
+
+    def grab_bayer(self, timeout=5.0):
+        """Latest frame off the native-format stream, as RGB ndarray."""
+        if self.proc is None or self.proc.poll() is not None:
+            if self.bayer_fmt is None:
+                if time.time() - self.bayer_probe_at < 5.0:
+                    return None      # probe retry scheduled, device busy
+                self.bayer_probe_at = time.time()
+                self.bayer_fmt = self._bayer_probe()
+            if self.bayer_fmt is None:
+                return None          # probe failed -> retry next polls
+            ok, sizes = self.bayer_fmt
+            if not ok or not sizes:
+                self.bayer_dead = True
+                return None
+            wh = self._bayer_pick(sizes)
+            if wh is None:
+                self.bayer_dead = True
+                return None
+            self.bayer_wh = wh       # the stream's native size wins
+            try:
+                self._bayer_spawn()
+            except FileNotFoundError:
+                return None
+        w, h = self.bayer_wh
+        ffn = w * h                   # Bayer = ONE byte per pixel
+        deadline = time.time() + timeout
+        while len(self.buf) < ffn:
+            if time.time() > deadline or self.proc.poll() is not None:
+                return None
+            try:
+                self.buf += self.proc.stdout.read(ffn)
+            except Exception:
+                return None
+        # only the LATEST frame matters
+        frames = len(self.buf) // ffn
+        raw = self.buf[(frames - 1) * ffn: frames * ffn]
+        self.buf = self.buf[frames * ffn:]
+        return self._bayer_rgb(raw)
+
     # ---- persistent MJPEG stream backend (v4l2-ctl) --------------------
     def _stream_spawn(self):
         args = ["v4l2-ctl", f"--device={self.device}"]
@@ -183,12 +333,24 @@ class WebcamGrabber:
         return out.stdout if out.stdout[:2] == b"\xff\xd8" else None
 
     def grab(self, timeout=30):
-        """Returns RGB ndarray or None. cv2 first (persistent object = real
-        webcam fps, no per-call overhead), then the ffmpeg raw stream, then
-        MJPEG stream, then per-call grabs (those decode their JPEG once).
+        """Returns RGB ndarray or None. Native-format Bayer stream first
+        (works on the gspca cams like the PlayStation Eye that expose no
+        MJPEG at all), then cv2 (persistent object = real webcam fps for
+        cams OpenCV understands), then the ffmpeg raw stream, then MJPEG
+        stream, then per-call grabs (those decode their JPEG once).
         A backend that proves itself dead (cv2 stuck behind gspca) gets
         turned OFF — reopening the capture every frame resets the device
         and starves every other process using it."""
+        if not self.bayer_dead:
+            arr = self.grab_bayer(timeout=timeout)
+            if arr is not None:
+                self.backend = "bayer"
+                return arr
+            if self.bayer_fmt is None:
+                # cam still initializing -> nobody else may open the
+                # device now (a second opener behind a gspca stream
+                # resets it); the probe gets retried on the next poll
+                return None
         try:
             if not self.cv2_off:
                 arr = self._try_cv2()

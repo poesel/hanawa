@@ -12,7 +12,7 @@
  *   [2] 0xFF  (magic)
  *   [3] checksum: low byte of sum(bytes[0..2] + all color bytes + fade byte)
  *   [4..] R G B per LED (with 0xAB: starting at [5])
- *   optional trailing byte after the last triplet: FADE in units of 100 ms
+ *   optional trailing byte after the last triplet: FADE in units of 50 ms
  *     (1 = 0.1 s .. 255 = 25.5 s). If present and > 0 the stripe does NOT
  *     jump to the new colors: it interpolates from whatever it currently
  *     shows to the new colors over that duration, on its own timer (a new
@@ -93,23 +93,31 @@ static void renderCur() {
 }
 
 static void newFrame(const uint8_t *rgb, int colors, uint8_t fadeByte) {
+  if (colors > frameLeds) frameLeds = colors;
   if (fadeByte == 0) {  // instant: old behaviour
-    frameLeds = colors;
     for (int i = 0; i < colors * 3; i++) {
       curC[i] = tgtC[i] = rgb[i];
       startC[i] = rgb[i];
+    }
+    // LEDs the PREVIOUS frame addressed but this one doesn't must not
+    // keep their old colour ("stuck LEDs") -> they go off
+    for (int i = colors * 3; i < frameLeds * 3; i++) {
+      curC[i] = tgtC[i] = startC[i] = 0;
     }
     fadeDurMs = 0;
     renderCur();
     return;
   }
   // start the fade from the CURRENT mix (also valid mid-fade)
-  frameLeds = colors;  // NOTE: a frame with a different length restarts geometry
   for (int i = 0; i < colors * 3; i++) {
     startC[i] = curC[i];
     tgtC[i] = rgb[i];
   }
-  fadeDurMs = (uint32_t)fadeByte * 100;
+  for (int i = colors * 3; i < frameLeds * 3; i++) {
+    startC[i] = curC[i];   // shrinking frames fade the extras to black,
+    tgtC[i] = 0;           // never leave them stuck at an old colour
+  }
+  fadeDurMs = (uint32_t)fadeByte * 50;  // tail byte = 50 ms units
   fadeElapsedMs = 0;
 }
 
@@ -242,7 +250,7 @@ void loop() {
       Serial.print("frame: ");
       Serial.print(colors);
       Serial.print(" LEDs, fade ");
-      Serial.print(fadeByte);  // 100ms units, 0 = instant
+      Serial.print(fadeByte);  // 50ms units, 0 = instant
       Serial.println(" -> ack 0x80");
     }
   }
