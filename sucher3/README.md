@@ -81,6 +81,12 @@ brightness). Points, segments and brightness persist to `state.json`,
 written atomically (tmp + `os.replace`) and re-read tolerantly — a
 truncated file used to throw in `load_state` and make every systemd
 start exit 1, which looked like a dead daemon with the port still open.
+`GET /api/points` hands the saved corners (plus `hSeg`/`vSeg`) back to the
+page, so reloading the UI restores the window — the green quad, the grid
+dots and the sampling boxes — instead of asking for 4 new clicks. The
+controls sit to the right of the picture: `#layout` is a flex row whose
+image column shrinks (`#stream`/`#overlay` follow it at 100 %), so the
+click handler converts CSS px → canvas px → frame space.
 The preview boxes are filled with the **true measured color** (not dimmed
 by the LED brightness) so they stay readable at low brightness.
 The sampling boxes reach 2 window segments into the screen (`depth` in
@@ -99,8 +105,14 @@ the deep top/bottom bands own the corner and no box sits inside another.
   — works in **both** modes: the fade is a PROTOCOL feature, every datagram
   carries a tail byte (duration in **50 ms** units, protocol max 255 =
   12.75 s, the UI slider caps at 1 s) and the LEUCHTER interpolates from its
-  current colors to the received ones on its own 40 ms timer. The Pi sends
-  no intermediate frames. 0 = instant.
+  current colors to the received ones on its own **2 ms** timer — that is the
+  fastest the diodes can display (an APA102 only resets its frame lock after
+  2 ms), so the fade is animated at the hardware maximum. The Pi sends no
+  intermediate frames. 0 = instant.
+- **Neighbour smoothing is on the Leuchter, not on the Pi**: the Pi keeps
+  sending the plain RMS colors, the sketch blends every incoming frame with
+  its neighbours (`(prev + 2*own + next) / 4`, ring) before it fades to it.
+  See `leuchter/src/main.cpp`, `LED_SMOOTH` in `config.h`.
 - **TV-off blackout**: while the screen is off the Pi sends black frames, so
   the whole stripe goes completely off (instead of a glow from the room
   reflected in the dark glass). "Off" is held for 1 s (`BLACK_HOLD`) and

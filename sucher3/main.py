@@ -110,6 +110,16 @@ class AmbilightStateHandler(SimpleHTTPRequestHandler):
             with LOCK:
                 res = STATE["result"]
             self.send_json(200, res if res else {"error": "no config"})
+        elif route == "/api/points":
+            # the 4 clicked corners as the SERVER has them (state.json), so a
+            # page reload restores the window instead of asking for it again
+            with LOCK:
+                pts = STATE["config"]["points"]
+                cfg = STATE["config"]
+                hs, vs = cfg["hSeg"], cfg["vSeg"]
+            self.send_json(200, {"points": [{"x": p[0], "y": p[1]} for p in pts]
+                                 if pts else [],
+                                 "hSeg": hs, "vSeg": vs})
         elif route == "/api/stats":
             with LOCK:
                 sender = SENDER
@@ -452,15 +462,21 @@ INDEX_HTML = r"""<!DOCTYPE html>
   <meta charset="utf-8"/>
   <title>sucher3 - Raspberry Pi + webcam</title>
   <style>
-    #stream-container { position: relative; display: inline-block; }
-    #overlay { position: absolute; left: 0; top: 0; pointer-events: none; }
-    #coords { display: inline-block; vertical-align: top; margin-left: 20px; }
+    /* the picture and the controls sit side by side: the image column
+       shrinks, the control column never does */
+    #layout { display: flex; flex-wrap: nowrap; align-items: flex-start; }
+    #stream-container { position: relative; flex: 1 1 640px; min-width: 240px; }
+    #stream { display: block; width: 100%; height: auto; }
+    #overlay { position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+               pointer-events: none; }
+    #coords { flex: 0 0 auto; margin-left: 16px; }
     button { margin-top: 10px; }
   </style>
 </head>
 <body>
   <h1>sucher3 Live View (webcam via V4L2) - v2</h1>
   <div id="camstats" style="font:12px monospace; margin-top:4px;">cam fps: – | mode: event | send: 1 fps | fade: 0 ms (Leuchter)</div>
+  <div id="layout">
   <div id="stream-container">
     <img id="stream" width="640" height="480"/>
     <canvas id="overlay" width="640" height="480"></canvas>
@@ -484,12 +500,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
       </label>
       <span id="brightVal">10 %</span>
       <br/>
-      <span title="the two radio buttons are one group: exactly one is always checked">Send-Mode (default Event):</span>
-      <label for="modeEvent"><input type="radio" name="mode" id="modeEvent"
-             checked> Event (one UDP packet per new image)</label>
-      <label for="modeTime"><input type="radio" name="mode" id="modeTime">
-             Time (constant Send-FPS rate, new images only move the color
-             target the Leuchter blends to)</label>
+      <span title="Event: one UDP packet per new image | Time: constant Send-FPS rate">Send-Mode:</span>
+      <label for="modeEvent"><input type="radio" name="mode" id="modeEvent" checked> Event</label>
+      <label for="modeTime"><input type="radio" name="mode" id="modeTime"> Time</label>
       <span id="modeVal">Event-Mode</span>
       <br/>
       <label title="Time-Mode only: how many UDP packets per second the Leuchter receives regardless of the camera rate">Send-FPS (Time-Mode only):
@@ -505,9 +518,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
       <span id="fadeVal">0 ms</span>
     </div>
 
-    <button id="reset" style="margin-top:10px;">Punkte zurückseet</button>
+    <button id="reset" style="margin-top:10px;">Punkte zurückset</button>
     <br/>
     <button id="ambilight" style="margin-top:10px;">Aktualisieren</button>
+  </div>
   </div>
 
   <script>
@@ -613,9 +627,10 @@ INDEX_HTML = r"""<!DOCTYPE html>
     document.getElementById('stream-container').addEventListener('click', e => {
       if (points.length >= 4) return;
       const rect = overlay.getBoundingClientRect();
-      // canvas -> frame space
-      const fx = (e.clientX - rect.left) / scale();
-      const fy = (e.clientY - rect.top) / scale();
+      // the canvas may be CSS-scaled (the image column shrinks to make room
+      // for the controls), so map CSS px -> canvas px -> frame space
+      const fx = (e.clientX - rect.left) * (overlay.width / rect.width) / scale();
+      const fy = (e.clientY - rect.top) * (overlay.height / rect.height) / scale();
       points.push({ x: fx, y: fy });
       const li = document.createElement('li');
       li.textContent = `(${Math.round(fx)}, ${Math.round(fy)}) frame` ;
@@ -642,6 +657,36 @@ INDEX_HTML = r"""<!DOCTYPE html>
       coordList.innerHTML = ''; drawPoints();
     });
     ambilightBtn.addEventListener('click', fetchAmbilightData);
+
+    // ---- the clicked corners survive a page reload -----------------------
+    // the daemon keeps them in state.json, so GET /api/points hands them
+    // back and the window (plus its grid) is redrawn without clicking again
+    function restorePoints() {
+      fetch('/api/points').then(r => r.json()).then(d => {
+        const pts = d.points || [];
+        if (pts.length !== 4) return;
+        points = pts.map(p => ({ x: p.x, y: p.y }));
+        const h = document.getElementById('hSeg');
+        const v = document.getElementById('vSeg');
+        if (d.hSeg) h.value = d.hSeg;
+        if (d.vSeg) v.value = d.vSeg;
+        coordList.innerHTML = '';
+        points.forEach(p => {
+          const li = document.createElement('li');
+          li.textContent = `(${Math.round(p.x)}, ${Math.round(p.y)}) frame`;
+          coordList.appendChild(li);
+        });
+        fetch('/api/grid', { method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ points,
+            hSeg: parseInt(h.value) || 40,
+            vSeg: parseInt(v.value) || 26 }) })
+          .then(r => r.json()).then(g => { gridPts = g.points; drawPoints(); })
+          .catch(console.error);
+        drawPoints();
+      }).catch(console.error);
+    }
+    restorePoints();
 
     // ---- cam-fps display + send policy (fps / fade / mode) --------------
     const camStats = document.getElementById('camstats');
