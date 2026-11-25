@@ -44,13 +44,26 @@ Rules:
 - `0x80` is only sent **after** the frame has been applied to the stripe → the Sucher can wait for it as a frame-sync signal.
 - **Fade (new)**: an optional trailing byte = fade duration in units of 50 ms.
   The ESP then does NOT jump to the new colors but interpolates from the colors it
-  currently shows to the received ones on a 40 ms timer (`FADE_TICK_MS`, 25 fps),
-  and answers `0x80` immediately (the ack means "frame accepted", not "fade done").
+  currently shows to the received ones on a **2 ms** timer (`FADE_TICK_MS`): that is
+  the fastest an APA102 diode can display, its frame lock only resets after 2 ms, so
+  a faster tick would be swallowed by the LEDs. `stepFade` interpolates by the REAL
+  elapsed time, so a tick the ESP could not afford only skips an in-between frame.
+  The mix factor is computed once per tick in 1/256 units (one multiply + a shift per
+  LED byte instead of a 64-bit division), which is what keeps a 2 ms tick affordable.
+  The ESP answers `0x80` immediately (the ack means "frame accepted", not "fade done").
   A frame arriving mid-fade restarts the fade from the current mix. Byte absent/0
   = old instant behaviour, so sucher2 frames are unaffected. `ledsender.py` has
   `--fade <seconds>` / menu `fade-sec <s>` to test it. Every cycle addresses
   ALL LEDs the stripe got so far: a frame with fewer triplets fades the
   leftovers to black instead of leaving "stuck" LEDs.
+- **Neighbour smoothing (new)**: before a new frame is shown or faded, every LED is
+  blended with its two neighbours, `out[i] = (in[i-1] + 2*in[i] + in[i+1]) / 4` — the
+  LED keeps half of its own color and gives a quarter to each neighbour. The stripe
+  wraps around the TV, so the last and the first LED of a frame average with each
+  other. Two buffers: every output reads the INPUT frame, never a value that was
+  already averaged this pass (in place would smear the colors along the stripe).
+  Only happens when a new frame arrives — the fade animation never re-averages.
+  Switch: `LED_SMOOTH` in `config.h` (1 = on).
 
 ## Software
 

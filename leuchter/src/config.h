@@ -51,11 +51,27 @@
 #define HEALTH_BYTE   0x80
 
 /* ---------------- Fade ---------------- */
-/* A datagram may carry a trailing byte = fade duration in units of 100 ms
+/* A datagram may carry a trailing byte = fade duration in units of 50 ms
    (see main.cpp protocol doc). The ESP interpolates cur -> new on this
-   timer; the tick is the animation resolution (40 ms = 25 fps). */
+   timer; the tick is the animation resolution.
+
+   2 ms is the FASTEST the hardware can show: an APA102 LED only resets
+   its frame lock after 2 ms, so a frame that arrives sooner is swallowed
+   by the diode (500 fps max). One show() of 150 LEDs costs ~0.4 ms of
+   SPI at 10 MHz, so the loop keeps up with the tick. stepFade() always
+   interpolates by the REAL elapsed time, so a tick that was missed by
+   the ESP only drops a frame, it never stretches or shortens the fade. */
 #ifndef FADE_TICK_MS
-#define FADE_TICK_MS  40
+#define FADE_TICK_MS  2
+#endif
+
+/* ---------------- Smoothing ---------------- */
+/* 1 = every incoming frame is blended with its neighbours before it is
+   shown/faded (see main.cpp, smoothInto). The stripe is a ring, so the
+   first and last LED of a frame are neighbours as well. Set to 0 to get
+   the raw frame colors. */
+#ifndef LED_SMOOTH
+#define LED_SMOOTH    1
 #endif
 
 /* ---------------- OTA ---------------- */

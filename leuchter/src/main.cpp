@@ -19,6 +19,19 @@
  *     frame arriving mid-fade restarts the fade from the current mix).
  *     Absent/0 = old instant behaviour, so sucher2 frames are unaffected.
  *
+ * Two things happen to a NEW frame before it reaches a diode (LED_SMOOTH
+ *   in config.h turns the first one off):
+ *   1. NEIGHBOUR SMOOTHING: new[i] = (old[i-1] + 2*old[i] + old[i+1]) / 4,
+ *      i.e. every LED keeps half of its own color and gives a quarter to
+ *      each neighbour. The stripe is a RING, so the last and the first LED
+ *      of a frame are neighbours too. Every new value is computed from the
+ *      OLD buffer into a scratch buffer - never in place - so an LED can
+ *      never mix in a neighbour that was already averaged.
+ *   2. FADE: the smoothed colors are only the TARGET. The stripe walks
+ *      from what it shows right now to that target over the fade duration,
+ *      on a FADE_TICK_MS timer (2 ms = the APA102's own frame-lock limit,
+ *      the fastest the hardware can display).
+ *
  * The checksum always covers the whole received payload. The frame decides how
  * many LEDs are addressed: a datagram with n triplets sends exactly n APA102
  * LED blocks, so a stripe of any length up to MAX_LEDS works with the same
@@ -80,9 +93,31 @@ static int parseHyperion(const uint8_t *buf, int len, const uint8_t **rgb_out,
 static uint8_t curC[MAX_LEDS * 3];
 static uint8_t tgtC[MAX_LEDS * 3];
 static uint8_t startC[MAX_LEDS * 3];
+static uint8_t smC[MAX_LEDS * 3];  // scratch: the smoothed copy of a frame
 static int frameLeds = 0;        // LEDs addressed by cur/tgt
 static uint32_t fadeDurMs = 0;   // running fade duration, 0 = nothing running
 static uint32_t fadeElapsedMs = 0;
+
+// Blend one frame with its neighbours: every LED keeps half of its own
+// color and gives a quarter to each neighbour,
+//   out[i] = (in[i-1] + 2*in[i] + in[i+1]) / 4  (rounded).
+// The stripe wraps around the TV, so LED colors-1 and LED 0 touch at the
+// corner and average with each other.
+//
+// Two buffers, not one: every output reads the INPUT, never an output that
+// was written earlier this pass. Averaging in place would mix an already
+// smoothed neighbour into the next LED and smear the colors along the
+// stripe instead of blurring them evenly.
+static void smoothInto(const uint8_t *in, uint8_t *out, int colors) {
+  for (int i = 0; i < colors; i++) {
+    int p = (i == 0 ? colors - 1 : i - 1) * 3;
+    int n = (i == colors - 1 ? 0 : i + 1) * 3;
+    for (int c = 0; c < 3; c++) {
+      int j = i * 3 + c;
+      out[j] = (uint8_t)((in[p + c] + 2 * in[j] + in[n + c] + 2) / 4);
+    }
+  }
+}
 
 static void renderCur() {
   for (int i = 0; i < frameLeds; i++) {
@@ -94,10 +129,21 @@ static void renderCur() {
 
 static void newFrame(const uint8_t *rgb, int colors, uint8_t fadeByte) {
   if (colors > frameLeds) frameLeds = colors;
+
+  // smoothing happens HERE only - a new frame is the only place new colors
+  // enter, the fade animation below never re-averages anything
+  const uint8_t *src = rgb;
+#if LED_SMOOTH
+  if (colors >= 2) {
+    smoothInto(rgb, smC, colors);
+    src = smC;
+  }
+#endif
+
   if (fadeByte == 0) {  // instant: old behaviour
     for (int i = 0; i < colors * 3; i++) {
-      curC[i] = tgtC[i] = rgb[i];
-      startC[i] = rgb[i];
+      curC[i] = tgtC[i] = src[i];
+      startC[i] = src[i];
     }
     // LEDs the PREVIOUS frame addressed but this one doesn't must not
     // keep their old colour ("stuck LEDs") -> they go off
@@ -108,10 +154,12 @@ static void newFrame(const uint8_t *rgb, int colors, uint8_t fadeByte) {
     renderCur();
     return;
   }
-  // start the fade from the CURRENT mix (also valid mid-fade)
+  // start the fade from the CURRENT mix (also valid mid-fade) towards the
+  // SMOOTHED colors - the blend is what the stripe fades to, not the raw
+  // frame
   for (int i = 0; i < colors * 3; i++) {
     startC[i] = curC[i];
-    tgtC[i] = rgb[i];
+    tgtC[i] = src[i];
   }
   for (int i = colors * 3; i < frameLeds * 3; i++) {
     startC[i] = curC[i];   // shrinking frames fade the extras to black,
@@ -121,14 +169,23 @@ static void newFrame(const uint8_t *rgb, int colors, uint8_t fadeByte) {
   fadeElapsedMs = 0;
 }
 
-// advance the animation by dtMs; returns true if something was shown
+// advance the animation by dtMs; returns true if something was shown.
+// dtMs is the REAL time since the last tick, so a tick the ESP could not
+// afford only skips an in-between frame - the fade still ends exactly at
+// its duration.
 static bool stepFade(uint32_t dtMs) {
   if (fadeDurMs == 0) return false;
   fadeElapsedMs += dtMs;
-  if (fadeElapsedMs >= fadeDurMs) fadeElapsedMs = fadeDurMs;
+  if (fadeElapsedMs > fadeDurMs) fadeElapsedMs = fadeDurMs;
+  // ONE mix factor for the whole tick, in 1/256 units (256 = arrived).
+  // That is the whole reason the tick can be as fast as 2 ms: a 64-bit
+  // multiply+divide per LED byte would eat most of a 2 ms tick on an
+  // ESP8266, this is one multiply and a shift. The rounding error is
+  // <= 1/256 of the color range, i.e. at most 1 of 255.
+  int f = (int)(((uint64_t)fadeElapsedMs * 256) / fadeDurMs);
   for (int i = 0; i < frameLeds * 3; i++) {
     int a = startC[i], b = tgtC[i];
-    curC[i] = (uint8_t)(a + (int64_t)(b - a) * fadeElapsedMs / fadeDurMs);
+    curC[i] = (uint8_t)(a + ((b - a) * f >> 8));
   }
   if (fadeElapsedMs >= fadeDurMs) fadeDurMs = 0;  // arrived, stop animating
   renderCur();
@@ -255,7 +312,9 @@ void loop() {
     }
   }
 
-  // fade animation ticks even when no new datagram arrives
+  // fade animation ticks even when no new datagram arrives - FADE_TICK_MS
+  // (2 ms) is the APA102's own frame-lock limit, so the fade is animated at
+  // the fastest rate the diodes can display
   static uint32_t lastAnim = 0;
   uint32_t now = millis();
   if (now - lastAnim >= FADE_TICK_MS) {

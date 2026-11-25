@@ -125,6 +125,13 @@ See [PLAN.md](PLAN.md). Short version:
   optionally followed by one **fade byte** (units of 50 ms, `ledsender.py
   --fade 3`): the ESP blends from what it shows to the new colors over that
   time instead of jumping, and answers `0x80` right away anyway.
+- What the ESP does with a new frame: first it **smooths** it with its
+  neighbours — `out[i] = (in[i-1] + 2*in[i] + in[i+1]) / 4`, ring, so LED 0 and
+  the last LED of a frame are neighbours — computed from the received frame into
+  a scratch buffer, never in place. Then those smoothed colors become the fade
+  target, animated on a **2 ms** timer (`FADE_TICK_MS`), the fastest the APA102
+  diodes can display. Both happen once per datagram, the animation never
+  re-smooths. Turn the smoothing off with `LED_SMOOTH 0` in `src/config.h`.
 - ESP applies the frame to the stripe, then answers with a one-byte UDP packet `0x80`.
 - Invalid magic/checksum: packet rejected, no `0x80` sent, logged on stdout.
 - The receiver accepts frames of **1..`MAX_LEDS` (150) LEDs** and addresses exactly
